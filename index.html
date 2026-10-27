@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sprint Retro Board</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="panel title-panel">
+      <h1>Sprint Retro Board</h1>
+    </div>
+    <div class="panel toolbar">
+      <button id="sort-btn" type="button" class="btn">Sort by votes</button>
+      <button id="clear-btn" type="button" class="btn btn-danger">Clear board</button>
+    </div>
+  </header>
+
+  <p id="save-notice" class="notice" role="status" hidden></p>
+
+  <main id="board" class="board">
+    <!-- On wide screens the viewport is the whiteboard: app.js and canvas.js pan and zoom the world. -->
+    <div id="viewport" class="viewport">
+      <div id="world" class="world">
+        <section class="frame frame-retro" aria-labelledby="retro-title">
+          <h2 id="retro-title" class="frame-title">Retro</h2>
+          <!-- The three columns are built by app.js from the list in logic.js. -->
+          <div id="retro-body" class="frame-body"></div>
+        </section>
+
+        <section class="frame frame-health" aria-labelledby="health-title">
+          <h2 id="health-title" class="frame-title">Squad Health Check</h2>
+          <div class="frame-body health-body">
+            <table class="health-table">
+              <thead>
+                <tr>
+                  <th scope="col" class="area-col">Area</th>
+                  <th scope="col" class="example-col">Example of Awesome</th>
+                  <th scope="col" class="vote-col vote-awesome"><span aria-hidden="true">🟢</span> Awesome</th>
+                  <th scope="col" class="vote-col vote-fine"><span aria-hidden="true">🟡</span> Fine</th>
+                  <th scope="col" class="vote-col vote-sad"><span aria-hidden="true">🔴</span> Sad</th>
+                  <th scope="col" class="example-col">Example of Crappy</th>
+                  <th scope="col" class="notes-col">Notes &amp; Comments</th>
+                </tr>
+              </thead>
+              <!-- One row per area, built by app.js. -->
+              <tbody id="health-rows"></tbody>
+            </table>
+            <button id="add-area" type="button" class="btn add-area-btn">+ Add area</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="panel zoom-controls" role="group" aria-label="Zoom">
+      <button id="zoom-out" type="button" class="zoom-btn" aria-label="Zoom out">−</button>
+      <span id="zoom-label" class="zoom-label" aria-live="polite">100%</span>
+      <button id="zoom-in" type="button" class="zoom-btn" aria-label="Zoom in">+</button>
+      <button id="zoom-fit" type="button" class="zoom-btn zoom-fit">Fit</button>
+    </div>
+  </main>
+
+  <div id="emoji-picker" class="picker" role="dialog" aria-label="Choose an emoji" hidden></div>
+
+  <script src="logic.js"></script>
+  <script src="storage.js"></script>
+  <script src="canvas.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,900 @@
+/* Every text/background pair below meets WCAG AA (4.5:1). Check new pairs before adding them.
+   Layout: phone mode by default; body.is-canvas (set by app.js from 768px wide) turns the page
+   into the whiteboard (plan §5.10, §5.14). */
+:root {
+  --ink: #1f2430;
+  --ink-muted: #545b6b;
+  --surface: #ffffff;
+  --line: #c9cdd6;
+  --primary: #2f4fb5;
+  --primary-ink: #ffffff;
+  --primary-hover: #243d8f;
+  --message: #9a3412;
+  --notice-bg: #fff4e5;
+  --notice-ink: #5c3200;
+  --chip: #eef0f5;
+  --disabled-bg: #e9ebf0;
+  --disabled-ink: #5f6675;
+
+  --well: #1e7a46;
+  --not-well: #b3261e;
+  --improve: #8a5a00;
+
+  /* Whiteboard */
+  --canvas-bg: #f3f2ee;
+  --canvas-dot: #cfcdc6;
+  --frame-line: #dcdde2;
+  --zone-bg: #f7f7f8;
+  --sticky-well: #d3f4dc;
+  --sticky-not-well: #ffdfe4;
+  --sticky-improve: #fff2a8;
+  --sticky-health: #d7e9ff;
+  --vote-awesome: #d3f4dc;
+  --vote-fine: #fff2a8;
+  --vote-sad: #ffd9d4;
+  --shadow-panel: 0 1px 3px rgba(31, 36, 48, 0.08), 0 8px 24px rgba(31, 36, 48, 0.08);
+  --shadow-note: 0 1px 2px rgba(31, 36, 48, 0.12), 0 4px 10px rgba(31, 36, 48, 0.08);
+  --shadow-note-lifted: 0 6px 14px rgba(31, 36, 48, 0.16), 0 18px 36px rgba(31, 36, 48, 0.16);
+
+  --radius: 10px;
+  --tap: 36px;
+  --focus: 3px solid var(--primary);
+
+  /* Must match NOTE_WIDTH and ZONE_WIDTH in logic.js. */
+  --note-width: 200px;
+  --zone-width: 464px;
+}
+
+@media (max-width: 767px) {
+  :root {
+    --tap: 44px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--canvas-bg);
+  background-image: radial-gradient(var(--canvas-dot) 1.2px, transparent 1.3px);
+  background-size: 24px 24px;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: var(--focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --- Floating panels: title, toolbar, zoom ------------------------------- */
+
+.panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.title-panel {
+  padding: 8px 16px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px;
+}
+
+.zoom-controls {
+  display: none;
+}
+
+.notice {
+  margin: 0 16px 12px;
+  padding: 10px 16px;
+  background: var(--notice-bg);
+  color: var(--notice-ink);
+  border-left: 4px solid var(--improve);
+  border-radius: 6px;
+}
+
+.notice[hidden] {
+  display: none;
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.btn,
+.emoji-btn,
+.zoom-btn {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.emoji-btn {
+  padding: 0;
+  font-size: 1.2rem;
+}
+
+.btn:hover,
+.emoji-btn:hover,
+.zoom-btn:hover {
+  background: var(--chip);
+}
+
+.btn-primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-ink);
+  font-weight: 600;
+}
+
+.btn-primary:hover {
+  background: var(--primary-hover);
+}
+
+.btn-danger {
+  color: var(--not-well);
+  font-weight: 600;
+}
+
+.btn:disabled,
+.btn:disabled:hover {
+  background: var(--disabled-bg);
+  border-color: var(--disabled-bg);
+  color: var(--disabled-ink);
+  cursor: not-allowed;
+}
+
+.btn-small {
+  font-size: 0.875rem;
+  padding: 0 10px;
+}
+
+/* --- Frames and columns -------------------------------------------------- */
+
+.board {
+  padding: 0 16px 32px;
+}
+
+.frame-title {
+  margin: 8px 0 10px;
+  font-size: 1.1rem;
+  color: var(--ink-muted);
+}
+
+.frame-body {
+  display: grid;
+  gap: 16px;
+}
+
+.column {
+  background: var(--surface);
+  border: 1px solid var(--frame-line);
+  border-top: 6px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.column-well { --accent: var(--well); --sticky: var(--sticky-well); }
+.column-notWell { --accent: var(--not-well); --sticky: var(--sticky-not-well); }
+.column-improve { --accent: var(--improve); --sticky: var(--sticky-improve); }
+
+.column h3 {
+  margin: 0 0 12px;
+  font-size: 1.2rem;
+  color: var(--accent);
+}
+
+/* --- Add and edit forms -------------------------------------------------- */
+
+.card-input {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  resize: vertical;
+}
+
+.card-input::placeholder {
+  color: var(--ink-muted);
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.counter {
+  margin-right: auto;
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+}
+
+.form-message {
+  min-height: 1.45em;
+  margin: 4px 0 0;
+  color: var(--message);
+  font-size: 0.875rem;
+}
+
+.edit-form {
+  margin-bottom: 10px;
+}
+
+/* --- Sticky notes ---------------------------------------------------------- */
+
+.empty-hint {
+  margin: 16px 0 4px;
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+.empty-hint[hidden] {
+  display: none;
+}
+
+.cards {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.note {
+  padding: 12px;
+  border-radius: 3px;
+  background: var(--sticky);
+  box-shadow: var(--shadow-note);
+}
+
+.note-well { --sticky: var(--sticky-well); }
+.note-notWell { --sticky: var(--sticky-not-well); }
+.note-improve { --sticky: var(--sticky-improve); }
+
+.card-text {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* --- Reactions ---------------------------------------------------------- */
+
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reaction {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* A zero reaction shows the sticky colour through, so the note stays calm. */
+.reaction.is-zero {
+  background: transparent;
+  border-style: dashed;
+  border-color: rgba(31, 36, 48, 0.3);
+}
+
+.react-btn,
+.unreact-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.react-btn:hover,
+.unreact-btn:hover {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+/* Only the emoji fades; the count stays full contrast. */
+.is-zero .react-emoji {
+  opacity: 0.5;
+  filter: grayscale(0.7);
+}
+
+.react-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.is-zero .react-count {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.unreact-btn {
+  justify-content: center;
+  padding: 0;
+  border-left: 1px solid var(--line);
+  font-weight: 700;
+}
+
+.react-btn:focus-visible,
+.unreact-btn:focus-visible {
+  outline-offset: -3px;
+}
+
+/* --- Squad Health Check (plan §5.13) -------------------------------------- */
+/* Phone mode (the default): the table becomes one block per area. */
+
+.note-health { --sticky: var(--sticky-health); }
+
+.health-body {
+  margin-top: 24px;
+}
+
+.health-table,
+.health-table tbody,
+.health-table tr,
+.health-table th,
+.health-table td {
+  display: block;
+}
+
+.health-table thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+/* Each area is a block; its three vote cells sit side by side, everything else is full width. */
+.health-table tr {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 8px;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--frame-line);
+  border-radius: var(--radius);
+}
+
+.health-table th,
+.health-table td {
+  grid-column: 1 / -1;
+}
+
+.health-table td {
+  margin-top: 12px;
+}
+
+.health-table td.vote-cell {
+  grid-column: auto;
+}
+
+.health-table td::before {
+  content: attr(data-label);
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.area-cell {
+  text-align: left;
+}
+
+.area-name {
+  display: block;
+  font-size: 1.1rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.area-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.example-text {
+  margin: 0;
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.area-field + .area-field {
+  margin-top: 8px;
+}
+
+.area-input-name {
+  min-height: 0;
+  resize: none;
+  font-weight: 700;
+}
+
+.area-edit-actions {
+  justify-content: flex-end;
+}
+
+.vote-awesome { --vote-tint: var(--vote-awesome); }
+.vote-fine { --vote-tint: var(--vote-fine); }
+.vote-sad { --vote-tint: var(--vote-sad); }
+
+.health-table .vote-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--vote-tint);
+}
+
+.health-table .vote-cell::before {
+  flex-basis: 100%;
+  margin: 0;
+  white-space: nowrap;
+  letter-spacing: 0;
+  font-size: 0.75rem;
+}
+
+.vote-cell.is-zero {
+  background: transparent;
+}
+
+.vote-count {
+  min-width: 1.5em;
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.vote-cell.is-zero .vote-count {
+  color: var(--ink-muted);
+  font-weight: 400;
+}
+
+.vote-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.vote-btn {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.vote-btn:hover {
+  background: var(--chip);
+}
+
+.add-note-form {
+  margin-bottom: 8px;
+}
+
+.notes {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.add-area-btn {
+  margin-top: 4px;
+}
+
+/* --- Emoji picker ------------------------------------------------------- */
+
+.picker {
+  position: absolute;
+  z-index: 1000;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+}
+
+.picker[hidden] {
+  display: none;
+}
+
+.picker-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 44px);
+  gap: 4px;
+}
+
+.picker-emoji {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 1.4rem;
+  cursor: pointer;
+}
+
+.picker-emoji:hover {
+  background: var(--chip);
+}
+
+/* ======================================================================
+   Whiteboard mode (body.is-canvas)
+   ====================================================================== */
+
+body.is-canvas {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.is-canvas .topbar {
+  position: fixed;
+  z-index: 20;
+  top: 0;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+}
+
+.is-canvas .topbar > * {
+  pointer-events: auto;
+}
+
+.is-canvas .notice {
+  position: fixed;
+  z-index: 20;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(640px, calc(100vw - 32px));
+  margin: 0;
+  box-shadow: var(--shadow-panel);
+}
+
+.is-canvas .board {
+  padding: 0;
+}
+
+.is-canvas .viewport {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background-color: var(--canvas-bg);
+  background-image: radial-gradient(var(--canvas-dot) 1.2px, transparent 1.3px);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.is-canvas .viewport.is-panning {
+  cursor: grabbing;
+}
+
+.is-canvas .world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 96px;
+  padding: 40px;
+  transform-origin: 0 0;
+  width: max-content;
+}
+
+.is-canvas textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.is-canvas .frame-title {
+  margin: 0 0 10px 4px;
+}
+
+.is-canvas .frame-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--frame-line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+}
+
+.is-canvas .column {
+  width: calc(var(--zone-width) + 32px);
+  border-top-width: 6px;
+  box-shadow: none;
+}
+
+.is-canvas .zone-wrap {
+  position: relative;
+  margin-top: 12px;
+}
+
+/* On the whiteboard the hint sits inside the empty area instead of pushing it down. */
+.is-canvas .empty-hint {
+  position: absolute;
+  z-index: 1;
+  top: 16px;
+  left: 0;
+  right: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.is-canvas .drop-zone {
+  position: relative;
+  width: var(--zone-width);
+  display: block;
+  margin: 0;
+  background: var(--zone-bg);
+  border-radius: 6px;
+  transition: box-shadow 0.15s;
+}
+
+.is-canvas .drop-zone.is-drop-target {
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+
+.is-canvas .note {
+  position: absolute;
+  width: var(--note-width);
+  cursor: grab;
+}
+
+.is-canvas .note.is-dragging {
+  z-index: 10000 !important;
+  cursor: grabbing;
+  box-shadow: var(--shadow-note-lifted);
+}
+
+.is-canvas .note.is-returning {
+  transition: transform 0.25s ease;
+}
+
+.is-canvas .react-btn,
+.is-canvas .unreact-btn {
+  min-height: 30px;
+  min-width: 30px;
+  padding: 0 7px;
+  font-size: 0.875rem;
+}
+
+.is-canvas .unreact-btn {
+  padding: 0;
+}
+
+.is-canvas .note .btn-small {
+  min-height: 30px;
+}
+
+/* On devices with a mouse, a note's Edit and Delete appear on hover or keyboard focus,
+   so the board stays tidy. They are always in the Tab order. */
+@media (hover: hover) {
+  .is-canvas .note .card-actions {
+    opacity: 0;
+    transition: opacity 0.12s;
+  }
+
+  .is-canvas .note:hover .card-actions,
+  .is-canvas .note:focus-within .card-actions {
+    opacity: 1;
+  }
+}
+
+/* The health check is a real table on the whiteboard. */
+.is-canvas .health-body {
+  display: block;
+  margin: 0;
+}
+
+.is-canvas .health-table {
+  display: table;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.is-canvas .health-table thead {
+  display: table-header-group;
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+}
+
+.is-canvas .health-table tbody {
+  display: table-row-group;
+}
+
+.is-canvas .health-table tr {
+  display: table-row;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+}
+
+.is-canvas .health-table th,
+.is-canvas .health-table td {
+  display: table-cell;
+  margin: 0;
+  padding: 12px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--frame-line);
+  border-right: 1px solid var(--frame-line);
+}
+
+.is-canvas .health-table th:last-child,
+.is-canvas .health-table td:last-child {
+  border-right: 0;
+}
+
+.is-canvas .health-table td::before {
+  content: none;
+}
+
+.is-canvas .health-table thead th {
+  padding: 10px 12px;
+  background: var(--zone-bg);
+  font-size: 0.9rem;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.is-canvas .health-table thead .vote-col {
+  background: var(--vote-tint);
+  text-align: center;
+}
+
+.is-canvas .area-col,
+.is-canvas .area-cell {
+  width: 180px;
+}
+
+.is-canvas .example-col,
+.is-canvas .example-cell {
+  width: 220px;
+}
+
+.is-canvas .vote-cell {
+  width: 112px;
+  border-radius: 0;
+  text-align: center;
+}
+
+.is-canvas .vote-cell .vote-count {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.is-canvas .vote-cell .vote-buttons {
+  justify-content: center;
+}
+
+.is-canvas .vote-btn {
+  min-height: 30px;
+  min-width: 34px;
+}
+
+.is-canvas .notes-cell {
+  width: calc(var(--zone-width) + 24px);
+}
+
+.is-canvas .notes.drop-zone {
+  margin-top: 8px;
+}
+
+.is-canvas .add-area-btn {
+  margin-top: 12px;
+}
+
+.is-canvas .zoom-controls {
+  position: fixed;
+  z-index: 20;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+}
+
+.is-canvas .zoom-btn {
+  min-width: 36px;
+  padding: 0 10px;
+  border-color: transparent;
+  font-size: 1.1rem;
+}
+
+.is-canvas .zoom-fit {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.zoom-label {
+  min-width: 3.5em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+  color: var(--ink-muted);
+}
