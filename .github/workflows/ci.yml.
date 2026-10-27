@@ -1,0 +1,24 @@
+# CI: runs the unit tests on every pull request and every push to main.
+# A red ❌ on a pull request means a test failed. Fix it before merging.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the unit tests
+        run: node --test
