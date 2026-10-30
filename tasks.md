@@ -1,15 +1,17 @@
 # Tasks: Sprint Retro Board
 
-**Status**: Approved v2 — v2 tasks (Phases 5–7) approved by the Product Owner on 27 October 2026
+**Status**: Approved v3 — v3 tasks (Phases 9–15) approved by the Product Owner on 29 October 2026
 **Created**: 26 October 2026
-**Updated**: 27 October 2026
-**Spec**: [spec.md](spec.md) (Approved v4) · **Plan**: [plan.md](plan.md) (Approved v3)
+**Updated**: 29 October 2026
+**Spec**: [spec.md](spec.md) (Approved v5) · **Plan**: [plan.md](plan.md) (Approved v4)
 
 > Work through the tasks in order. Tasks marked **[P]** don't depend on each other and can be done in any order within their phase. Each phase ends with a checkpoint: the app must work and the tests must pass before the next phase starts.
 >
 > For `logic.js` and `storage.js`, the tests are written first: write the test, see it fail, then write the rule until it passes.
 >
-> Phases 1–4 (v1) are done. Phases 5–7 build v2. Phase 8 is the final checks for everything, as agreed with the Product Owner.
+> Phases 1–4 (v1) are done. Phases 5–7 build v2. Phase 8 is the final checks for v1 and v2 (parked). Phases 9–15 build v3, the shared live board.
+>
+> **[v3] Who does what**: tasks marked **👩‍💼 PO** are done by the Product Owner in the AWS console or on the GitHub website, with Claude guiding step by step. Claude does everything else.
 
 ---
 
@@ -242,6 +244,186 @@ Rules and saving:
 
 ---
 
+## Phase 9 — AWS files and console setup [v3]
+
+Claude writes the AWS pieces into the repo first, so they can be reviewed before anything is created on AWS:
+
+- [x] **T055** Write `aws/schema.graphql` (plan §5.15).
+  - It has the `Change` type, the 2 queries, the 11 mutations and the `onChange(boardId)` subscription.
+  - The secrets appear only as inputs, never in any output type.
+- [x] **T056** Write the resolvers in `aws/resolvers/`, one file per operation (plan §4, §5.15, §5.17).
+  - Use DynamoDB conditions for the owner and facilitator checks, the 300-note limit, `generation`, and "never below 0".
+  - Use transactions for the operations that change more than one item.
+  - Every change stamps `updatedAt` and `expiresAt` on the board item.
+  - Work out `mine` and `isFacilitator` on AWS.
+- [x] **T057** Write `aws/SETUP.md` and `aws/TEARDOWN.md`, with click-by-click console steps (plan §11).
+
+**Checkpoint 9a**: the Product Owner has read the schema and both guides.
+
+Then the Product Owner sets up AWS in the web console, in a private window signed in to the **personal** account. Claude guides each step:
+
+- [x] **T058** 👩‍💼 PO: pick the region, and create the **$1 monthly budget** with email alerts at 80% and 100%.
+- [x] **T059** 👩‍💼 PO: create the DynamoDB table `RetroBoard`: `pk` and `sk` as Strings, **on-demand** capacity, and **TTL** on `expiresAt`.
+- [x] **T060** 👩‍💼 PO: create the AppSync GraphQL API `retro-board`:
+  - paste in the schema
+  - add the table as a data source
+  - attach every resolver
+  - leave logging off
+- [x] **T061** 👩‍💼 PO: test it in the AppSync console's **Queries** page:
+  - create a board, add a note, react to it
+  - try to edit the note with the wrong secret, and check it's refused
+  - check the items in DynamoDB's **Explore items**
+- [x] **T062** 👩‍💼 PO: create the **API key** (expiring in about 6 months), and send Claude the GraphQL endpoint, the real-time endpoint and the API key for `config.js`.
+- [x] **T063** 👩‍💼 PO: on GitHub, tag the current `main` as **`v2.0`** (Releases → Draft a new release → new tag `v2.0`), so v2 can be brought back after teardown (plan §9).
+
+**Checkpoint 9**: AWS answers the console tests correctly, the owner check refuses a wrong secret, and the budget alert exists.
+
+---
+
+## Phase 10 — Sync foundations: rules and browser settings [v3]
+
+Tests first (in `tests/logic.test.js`):
+
+- [x] **T064** [P] Tests for **`applyChange`** (plan §5.16), one or more for each change type:
+  - notes added, edited, deleted and moved
+  - reactions +1 and −1
+  - votes
+  - board cleared (new generation)
+  - area saved and deleted (its notes hidden)
+- [x] **T065** [P] Tests for **sync rules**:
+  - a change id that has already been applied is skipped
+  - +1 from several people adds up
+  - the last move wins
+  - a note being dragged here ignores moves from others until it's dropped
+  - notes from older generations are hidden
+- [x] **T066** [P] Tests for **permissions on screen** (spec Stories 6, 8, 15, 18):
+  - Edit and Delete only when `mine`
+  - Clear board, Add area and area Edit/Delete only when `isFacilitator`
+- [x] **T067** [P] Tests for **chunking and limits**:
+  - Sort's moves split into chunks of 24, and old notes split into batches of 24
+  - adding a note on a board with 300 notes is refused with "This board is full (300 notes)"
+- [x] **T068** Write the rules in `logic.js` until T064–T067 pass.
+
+Browser settings (in `storage.js`, tests first in `tests/storage.test.js`):
+
+- [x] **T069** Tests and code for the **browser settings** (plan §4):
+  - the secret is created once and then kept
+  - the last board is remembered
+  - zoom and position are saved per board
+  - the old v1 or v2 board is offered for moving only once, and is never changed
+  - when `localStorage` is blocked, everything still works with a new identity each time
+
+**Checkpoint 10**: `node --test` passes everything, including all v1 and v2 tests. Nothing on screen has changed yet.
+
+---
+
+## Phase 11 — Talking to AWS: `cloud.js` and the fake AWS [v3]
+
+- [x] **T070** Write `tests/fake-aws.js` (plan §7), using Node's built-in modules only:
+  - serves the app's files
+  - answers the same queries and mutations over HTTP, with the same owner, facilitator, limit and generation rules as the real resolvers
+  - pushes changes over WebSocket using AppSync's real-time protocol (`connection_init`, `connection_ack`, `start`, `data`, `ka`)
+  - can drop the connection on request, for tests
+- [x] **T071** Write `config.js`, and `cloud.js` part 1: **queries and changes** with `fetch` (plan §5.15).
+  - It sends the API key, returns the `Change`, and turns AWS refusals into clear errors: not yours, not the facilitator, board full, board cleared, board missing.
+- [x] **T072** `cloud.js` part 2: **live changes** over `WebSocket` (plan §5.16, §5.18).
+  - Connect, subscribe to `onChange(boardId)`, and pass each `Change` to the app.
+  - Watch the keep-alive.
+  - Report **connecting**, **live** and **lost**.
+  - Retry after 1, 2, 4, 8 and then every 15 seconds.
+- [x] **T073** A small Node script checks `cloud.js` against `fake-aws.js`: two clients, one adds a note and the other receives it; and a dropped connection reconnects.
+
+**Checkpoint 11**: `cloud.js` works against the fake AWS, including reconnecting.
+
+---
+
+## Phase 12 — The shared board in the app [v3]
+
+- [x] **T074** **Opening a board** (Story 16.1–16.2, 16.4, 16.7, 19.4; plan §5.19)
+  - Read `#board=` from the address, use the last board, or create a new one.
+  - Load the board and its notes, page by page, and open the live connection.
+  - Show "This board doesn't exist or has been deleted." with **Start a new board**.
+  - Show "Can't reach the shared board…" with **Try again**.
+- [x] **T075** **Every action goes to AWS** (Stories 2, 4, 5, 6, 8, 11, 13, 14, 15; plan §5.20)
+  - Adding, editing, deleting, reacting, voting, dragging, Sort by votes, Clear board and area changes each send their change.
+  - Each is applied through `applyChange` once AWS confirms it.
+  - Refusals show their message, and an edit that's refused restores the old text.
+- [x] **T076** **Live redraw** (Story 17; plan §5.16)
+  - Others' changes redraw the board without touching zoom, a note being typed or edited, or keyboard focus.
+  - A note being dragged ignores others' moves until it's dropped.
+  - The board reloads after every reconnect.
+- [x] **T077** **Who sees which buttons** (Stories 6, 8, 15, 18; plan §5.17)
+  - Edit and Delete only on my notes.
+  - Clear board, Add area and area Edit/Delete only for the facilitator, on the whiteboard and in phone mode.
+- [x] **T078** **Clear board and deleted areas** (Story 8, 15.5; plan §5.20)
+  - The screen updates through the new generation.
+  - The facilitator's browser removes old notes in the background, in batches of 24.
+  - A note typed during a Clear is still added, retrying once with the new generation.
+- [x] **T079** **Top bar** (Story 16.3, 16.5; plan §5.19, §6)
+  - **🔗 Copy link**, with "Link copied", and a fallback box if the clipboard is blocked.
+  - **New board**, with its confirmation.
+  - Remember the last board.
+- [x] **T080** **Connection banner** (Story 19; plan §5.18, §6)
+  - "Connection lost. Reconnecting…", announced to screen readers.
+  - Every changing button is disabled and dragging is off.
+  - Typed text is kept, and everything comes back once the connection does.
+- [x] **T081** **Moving the old board** (Story 20; plan §5.19)
+  - The first board created in a browser that has a saved v1 or v2 board starts with its areas, votes and notes.
+  - The notes keep their text, positions, reactions and age, and are owned by this browser.
+  - The move happens only once.
+- [x] **T082** **Zoom per person** (Story 7.2): zoom and position are saved per board in this browser, and never sent to AWS.
+- [x] **T083** Remove the old local saving of the board, and update the "can't save" notice for browser settings only (plan §5.20).
+
+**Checkpoint 12**: the app works fully against `fake-aws.js` in two browser tabs, on the whiteboard and in phone mode.
+
+---
+
+## Phase 13 — Automated checks for two people [v3]
+
+- [x] **T084** Update `tests/browser-check.js`:
+  - start `fake-aws.js`, and load the app from it instead of `file://`
+  - update the v1 and v2 checks where v3 changed the behaviour (saving, Clear board for the facilitator)
+- [x] **T085** Add **two-tab checks** (plan §7), with tab A as the facilitator and tab B as a teammate:
+  - live adds within 2 seconds
+  - no Edit or Delete on someone else's note, but reactions work
+  - simultaneous reactions both count
+  - live moves and Sort
+  - only the facilitator can Clear or change areas, and everyone sees the result
+  - a missing board
+  - connection lost and back, with typed text kept
+  - the old board moved once
+  - Copy link
+  - phone mode
+- [x] **T086** Confirm CI still passes: `node --test` runs the new tests, and needs no AWS.
+- [x] **T087** [P] Update `README.md` and `documentation.md`: sharing a board, who can do what, the AWS pieces, the `aws/` folder, and the teardown.
+
+**Checkpoint 13**: all unit tests and every browser check (v1, v2 and v3) pass.
+
+---
+
+## Phase 14 — Real AWS check and release [v3]
+
+- [x] **T088** 👩‍💼 PO, with Claude: **manual check on the real AWS** (plan §7). Use two windows (one normal, one private) and a phone if possible, going through Stories 16–20 and the two-person parts of Stories 4, 6, 8, 11 and 15.
+- [x] **T089** Fix anything found in T088, then re-run all the tests.
+- [ ] **T090** 👩‍💼 PO: upload the v3 files to a new branch `shared-board` on the GitHub website, and open a PR.
+  - Review it in **Files changed**.
+  - Watch CI turn ✅.
+  - **Squash and merge**, then watch GitHub Pages update.
+- [ ] **T091** 👩‍💼 PO: open the live site in two windows and check that a card added in one appears in the other.
+- [ ] **T092** 👩‍💼 PO: check AWS **Billing** and the AppSync **Monitoring** page a day later, to confirm the usage and that it costs $0.
+
+**Checkpoint 14 (v3 done)**: the shared board is live on GitHub Pages, works for two or more people, and costs $0.
+
+---
+
+## Phase 15 — Teardown [v3] (later: before the AWS free plan ends, about April 2027)
+
+- [ ] **T093** 👩‍💼 PO: on GitHub, open a PR that brings back the `v2.0` files (plan §9), and merge it once CI passes, so the live site works without AWS.
+- [ ] **T094** 👩‍💼 PO: follow `aws/TEARDOWN.md`. Delete the AppSync API, the DynamoDB table, the data source's IAM role, and any `/aws/appsync/` log groups.
+- [ ] **T095** 👩‍💼 PO: check that Billing shows no running services and $0 in Cost Explorer, then delete the budget if you like.
+
+---
+
 ## Coverage
 
 | Spec story | Tasks |
@@ -260,4 +442,10 @@ Rules and saving:
 | 12 See the health check | T024, T039 |
 | 13 Health votes | T024, T040 |
 | 14 Health notes | T025, T042 |
-| 15 Change areas | T024, T041, T043 |
+| 15 Change areas | T024, T041, T043, T066, T077, T078 |
+| **[v3]** 4, 5, 6, 7, 8, 11, 13, 14 as shared | T056, T064–T068, T075–T078, T082, T085 |
+| **[v3]** 16 Start and share a board | T074, T079, T085, T088 |
+| **[v3]** 17 See changes live | T064, T065, T072, T076, T085, T088 |
+| **[v3]** 18 Only change my own notes | T055, T056, T061, T066, T077, T085 |
+| **[v3]** 19 Lose and regain the connection | T072, T074, T080, T085 |
+| **[v3]** 20 Keep my old board | T069, T081, T085 |

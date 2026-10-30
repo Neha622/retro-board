@@ -1,13 +1,13 @@
 # Implementation Plan: Sprint Retro Board
 
-**Status**: Approved v3 — v2 (whiteboard canvas and Squad Health Check) approved by the Product Owner on 27 October 2026
+**Status**: Approved v4 — v3 (shared live board on AWS) approved by the Product Owner on 29 October 2026
 **Created**: 26 October 2026
-**Updated**: 27 October 2026
-**Spec**: [spec.md](spec.md) (Approved v4)
+**Updated**: 29 October 2026
+**Spec**: [spec.md](spec.md) (Approved v5)
 
 > This plan describes HOW the app in the spec will be built. It contains no code. The task list is in [tasks.md](tasks.md).
 >
-> Sections marked **[v2]** are new or changed for the whiteboard and health check. Everything else is v1 and already built.
+> Sections marked **[v2]** are new or changed for the whiteboard and health check. Sections marked **[v3]** are new or changed for the shared live board. Everything else is v1 and already built.
 
 ---
 
@@ -18,6 +18,25 @@ A single web page that runs in the browser on the Scrum Master's laptop. It is w
 **[v2]** On laptop-sized screens, the page becomes a whiteboard. Pan and zoom work by moving and scaling one large area with a CSS transform. Notes are dragged with the browser's pointer events. On phones, the same content is shown as a simple stacked page with no transform and no dragging.
 
 **Why this approach**: v1 and v2 both run on one shared screen with no logins and no syncing (spec §2, §8). Pan, zoom and dragging for about 150 notes don't need a library: CSS transforms and pointer events are built into every supported browser and are fast. Staying library-free keeps the "double-click `index.html`" way of running the app.
+
+**[v3]** The board moves from `localStorage` to **AWS**, so everyone with the link shares it live:
+
+```
+ Each person's browser                          AWS (one region, set up in the web console)
+┌──────────────────────┐   queries and changes  ┌──────────────────────┐        ┌───────────────────┐
+│ index.html + app.js  │ ── HTTPS (fetch) ────▶ │  AWS AppSync          │ ─────▶ │  Amazon DynamoDB   │
+│ cloud.js             │                        │  (GraphQL API with    │        │  table "RetroBoard"│
+│                      │ ◀── live changes ───── │   checks in resolvers)│ ◀───── │  boards and notes  │
+└──────────────────────┘   (WebSocket)          └──────────────────────┘        └───────────────────┘
+        ▲  page files from GitHub Pages (unchanged)
+```
+
+- **AppSync** is the front door. Every change is a GraphQL **mutation**. AppSync checks the rules (whose note it is, who the facilitator is) in small JavaScript **resolvers**, writes to DynamoDB, and pushes the change to everyone watching that board through a GraphQL **subscription**.
+- **DynamoDB** stores the boards and notes.
+- The app still uses **no libraries**. `cloud.js` talks to AppSync with the browser's own `fetch` and `WebSocket`, following AppSync's documented real-time protocol.
+- The page files are still static and still served by GitHub Pages; only the data moves.
+
+**Why AppSync + DynamoDB**: they're AWS's ready-made pieces for "a database that pushes changes to browsers". Both can be created and deleted entirely in the web console (spec decision 29), both are serverless (nothing to keep running or patch), and a retro board's usage is a tiny fraction of the free plan's credits.
 
 ## 2. Technical choices
 
@@ -33,6 +52,13 @@ A single web page that runs in the browser on the Scrum Master's laptop. It is w
 | **[v2]** Health check table | A real HTML `<table>` on the whiteboard | Screen readers announce rows and column headings for free. On phones, CSS turns each row into a block. |
 | Running it | Open `index.html` by double-clicking, or host it as static files | Scripts are loaded as classic scripts, not ES modules, because modules don't load from a double-clicked file in some browsers. Confirmed by the Product Owner. |
 | Supported browsers | Current Chrome, Edge, Safari and Firefox (from 2024 on) | Confirmed by the Product Owner. |
+| **[v3]** Shared store | **AWS AppSync** (GraphQL API) + **Amazon DynamoDB** (one table), in one AWS region | Live updates built in; created in the console; serverless; deleted in a few clicks (§11). |
+| **[v3]** Access to the API | AppSync **API key**, kept in `config.js` | The simplest AppSync access mode, and it matches the "secret board link" decision. The key is visible to anyone who looks at the page's code, so the real protection is the long random board code plus the checks in §5.17. The key is set to expire after about 6 months, in line with the free plan. |
+| **[v3]** Rules on AWS | AppSync **JavaScript resolvers** (`APPSYNC_JS` runtime) with DynamoDB **condition expressions** and **transactions** | The checks happen on AWS, not only in the browser, so a hidden button can't simply be un-hidden. Conditions also make reactions and votes add up safely when people click at the same moment. |
+| **[v3]** Talking to AppSync | Plain `fetch` for queries and mutations; plain `WebSocket` for subscriptions | No AWS library is needed in the browser, so there's still no build step and nothing to install. |
+| **[v3]** Board link | `…/retro-board/#board=<id>`, where `<id>` is `crypto.randomUUID()` | The part after `#` is never sent to GitHub Pages, so board codes don't appear in any web server's logs. A random UUID can't be guessed. |
+| **[v3]** Identity | A second random UUID per browser (the **browser secret**), kept in `localStorage` | Sent with each change. AWS stores it on the notes and boards it creates, and never sends it back out (§5.17). |
+| **[v3]** Running it | GitHub Pages as before; double-clicking `index.html` still works for development | Both need an internet connection to reach AWS. |
 
 ## 3. Files
 
@@ -52,12 +78,26 @@ Retro-board/
 │   ├── browser-check.js    [v2] Drives headless Chrome through the spec's stories (moved from the
 │   │                       scratch script used for v1)
 │   └── manual-checklist.md One line per acceptance criterion, for the final hand checks
+├── config.js       [v3] The AppSync API address, real-time address and API key. Nothing else
+├── cloud.js        [v3] Talks to AppSync: sends queries and changes (fetch), listens for live
+│                   changes (WebSocket), reconnects, and reports the connection state to app.js
+├── aws/            [v3] Everything that lives on AWS, kept in the repo so it's reviewed in PRs
+│   ├── schema.graphql      The GraphQL schema to paste into AppSync
+│   ├── resolvers/          One small JavaScript file per query or mutation, to paste into AppSync
+│   ├── SETUP.md            Step-by-step console instructions (§11)
+│   └── TEARDOWN.md         Step-by-step instructions to delete everything (§11)
+├── tests/
+│   ├── …                   (as before)
+│   └── fake-aws.js         [v3] A stand-in for AppSync that runs on your Mac: serves the app files
+│                           and answers the same queries, changes and live updates, in memory
 ├── spec.md
 ├── plan.md
 └── tasks.md
 ```
 
 `logic.js`, `storage.js` and `canvas.js`'s maths don't touch the page, so the tricky rules can be tested automatically, without a browser. If `app.js` gets hard to follow, the health check drawing moves to its own `health.js`.
+
+**[v3]** `logic.js` gains one important pure function, `applyChange(board, change)`, which applies one live change to the board. Both your own changes and everyone else's go through it, so it is the heart of the sync and is tested thoroughly. `storage.js` keeps loading old v1 and v2 boards (for the one-off move in §5.19) and now also keeps the browser's own settings: its secret, its last board, and the zoom per board.
 
 ## 4. Data [v2]
 
@@ -108,6 +148,27 @@ One entry in `localStorage` under the key `retro-board`:
 - `view` is `null`, so the first open does a "Fit"
 
 The cards are then placed in neat rows in their v1 order the first time the board is drawn, and saved.
+
+### Shared data on AWS [v3]
+One DynamoDB table, **`RetroBoard`**, holds every board. Each board is a small group of **items** that share its board code:
+
+| Partition key `pk` | Sort key `sk` | What the item holds |
+|---|---|---|
+| `<board id>` | `BOARD` | `facilitatorSecret` · `generation` (goes up by 1 on each Clear) · `noteCount` · `areas` (a map from area id to name, examples and order) · `votes` (a map from area id to awesome, fine and sad counts) · `createdAt` · `updatedAt` · `expiresAt` |
+| `<board id>` | `NOTE#<note id>` | `kind` (card or health) · `column` or `areaId` · `text` · `createdAt` · `x`, `y`, `z` · `reactions` (the five counts) · `ownerSecret` · `generation` |
+
+- **Why one item per note:** a reaction or a move then writes one small item, rather than rewriting the whole board. That's cheaper, and two people changing different notes never get in each other's way.
+- **Why areas and votes live in the board item:** there are only about 11 areas, they change rarely, and only the facilitator changes them. Keeping them together makes **Clear board** a single update.
+- **`ownerSecret` and `facilitatorSecret`** are never part of the GraphQL schema's output, so AppSync can't send them to anyone (§5.17).
+- **`generation`:** **Clear board** doesn't delete every note one by one. It adds 1 to the board's `generation`, and from then on only notes with the new `generation` are shown. The old notes become invisible at once for everyone, and the facilitator's browser then deletes them in the background, in batches of 24.
+- **`expiresAt`:** DynamoDB's **TTL** (time to live) feature deletes the board item 90 days after its last change. Every change sets `expiresAt` to now + 90 days. Once the board item is gone, its link shows "This board doesn't exist", and any notes left behind can't be reached. They're removed when the table is deleted (§11).
+- **`noteCount`:** keeps the 300-note limit. Adding notes only succeeds while the count leaves room.
+
+### Kept in this browser only [v3]
+`localStorage` now holds the browser's own settings, not the board:
+- `retro-browser`: the **browser secret**, the **last board id**, and whether the old saved board has been **moved** (§5.19)
+- `retro-view-<board id>`: the zoom and position for that board (spec Story 7.2)
+- `retro-board`: the old v1 or v2 board, left untouched after the move
 
 ### Kept in memory only, not saved
 - What is being edited (one card, health note or area), and its unsaved text.
@@ -226,6 +287,76 @@ All of these are pure functions in `logic.js`, so they can be tested:
   - Nothing can be dragged.
 - Positions are not changed by phone mode, so the whiteboard looks the same again on a laptop.
 
+### 5.15 The GraphQL API [v3]
+These are the operations in `aws/schema.graphql`. Every **mutation** returns a `Change`: the board id, a change type, a unique change id, and the details as JSON. The single **subscription** `onChange(boardId)` delivers every `Change` for that board to everyone watching it.
+
+| Operation | Who may do it | What it does on DynamoDB |
+|---|---|---|
+| `getBoard(boardId, secret)` | Anyone with the link | Reads the board item. Returns areas, votes, `generation`, and `isFacilitator` (worked out on AWS by comparing secrets) |
+| `listNotes(boardId, secret, nextToken)` | Anyone with the link | Reads the notes of the current `generation`, page by page. Each note comes with `mine: true/false`, worked out on AWS the same way |
+| `createBoard(boardId, secret, areas)` | Anyone | Creates the board item, if the id is not already taken. The caller becomes the facilitator |
+| `addNotes(boardId, secret, generation, notes)` | Anyone | One **transaction**: up to 24 new notes, owned by the caller, plus a board update that raises `noteCount`. Fails if the board would go over 300 notes or has been cleared since (`generation` changed) |
+| `editNote(boardId, secret, noteId, text)` | The note's owner | Updates the text only if `ownerSecret` matches |
+| `deleteNote(boardId, secret, noteId)` | The note's owner | One transaction: deletes the note if `ownerSecret` matches, and lowers `noteCount` |
+| `moveNotes(boardId, moves)` | Anyone | One transaction: new `x`, `y`, `z` and column or area for up to 24 notes. Used for dragging (1 note) and **Sort by votes** (many notes, sent in chunks of 24) |
+| `react(boardId, noteId, reaction, delta)` | Anyone | Adds +1 or −1 to one reaction **on AWS**. A −1 only succeeds if the count is at least 1 |
+| `vote(boardId, areaId, kind, delta)` | Anyone | The same, for a health vote |
+| `clearBoard(boardId, secret)` | The facilitator | Raises `generation`, sets `noteCount` to 0 and every vote to 0 |
+| `saveArea(boardId, secret, area)` | The facilitator | Adds or edits one area |
+| `deleteArea(boardId, secret, areaId)` | The facilitator | Removes the area and its votes. Its health notes disappear from view at once and are deleted in the background |
+| `removeNotes(boardId, secret, noteIds)` | The facilitator | Deletes up to 24 leftover notes after a Clear or a deleted area. Not sent to other screens |
+
+Every change also stamps the board item's `updatedAt` and `expiresAt` in the same transaction, so "90 days after the last change" is exact.
+
+### 5.16 Live sync [v3]
+- **Opening a board**: `cloud.js` calls `getBoard` and `listNotes`, and opens the subscription. The board is drawn once everything has arrived.
+- **Making a change**: the app sends the mutation. When AWS confirms it, the returned `Change` goes through `applyChange`, and the board is redrawn. The same `Change` also arrives through the subscription a moment later, and is skipped because its change id has already been applied.
+- **Someone else's change**: it arrives through the subscription, goes through `applyChange`, and the board is redrawn. As in v2, redrawing never touches a note being typed or edited, and keeps keyboard focus (§5.1). Zoom and position are never part of a change.
+- **Counts**: reactions and votes arrive as "+1" or "−1", not as a new total, so changes from several people add up correctly.
+- **Moves**: arrive as the final position, and the last one to arrive wins. A note being dragged on my screen ignores moves from others until I drop it.
+- **Clear board**: arrives as "the generation is now N". Every screen hides notes from older generations at once.
+- **Drift protection**: after any reconnect (§5.18), the app reloads the whole board from AWS rather than trusting that it saw every change.
+
+### 5.17 Who can change what [v3]
+- **The browser secret** is created the first time the app runs, and sent with every change that needs an owner or facilitator check.
+- **Owner checks**: `editNote` and `deleteNote` include the DynamoDB condition `ownerSecret = :secret`. If it doesn't match, AWS refuses, and the app shows "You can only change your own notes" (spec Story 6.9).
+- **Facilitator checks**: `clearBoard`, `saveArea`, `deleteArea` and `removeNotes` include the condition `facilitatorSecret = :secret`.
+- **What the browser is told**: `mine` on each note and `isFacilitator` on the board. AWS works these out by comparing secrets, so the secrets themselves are never sent to anyone. The app shows **Edit** and **Delete** only when `mine` is true, and **Clear board**, **Add area** and the areas' **Edit** and **Delete** only when `isFacilitator` is true.
+- **Notes arriving live**: new notes from others are never mine. My own new notes are marked as mine when AWS confirms them.
+- **Limits**, as agreed in the spec: another browser has another secret, and clearing browser data loses the secret.
+
+### 5.18 Connection [v3]
+- `cloud.js` reports one of three states to `app.js`: **connecting**, **live** or **lost**.
+- **Lost**:
+  - The top banner says "Connection lost. Reconnecting…".
+  - Every button that changes the board is disabled, and dragging is off.
+  - Text boxes keep their text.
+  - `cloud.js` retries after 1, 2, 4, 8 and then every 15 seconds.
+- **Back**: the board is reloaded (§5.16), the banner goes away and the buttons come back.
+- **AppSync's keep-alive**: AppSync sends a "ka" message regularly. If none arrives within the time AppSync tells us when connecting, the connection counts as lost, even if the browser hasn't noticed yet, for example after a laptop wakes from sleep.
+- **Nothing reachable when opening**: the page shows "Can't reach the shared board. Check your connection and try again." with a **Try again** button, and no board.
+- **A change refused because the board was cleared** (the `generation` didn't match): the app reloads the board and sends the new note again once, so typed text isn't lost (spec Story 8.6).
+
+### 5.19 Starting, sharing and moving boards [v3]
+- **On opening**:
+  1. If the address has `#board=<id>`, open that board.
+  2. If not, and this browser has a last board, put it in the address and open it.
+  3. If not, create a new board (below).
+- **Creating a board**:
+  1. Make a new random id and call `createBoard` with the 11 starter areas.
+  2. **Move the old board, once** (spec Story 20): if this browser has a saved v1 or v2 board and hasn't moved it yet, its areas and votes go into `createBoard`, and its notes are sent through `addNotes` in chunks, keeping their text, positions, reactions and age. They're owned by this browser.
+  3. Mark the move as done. The old saved copy is not changed.
+- **A missing board** (`getBoard` finds nothing): show "This board doesn't exist or has been deleted." with **Start a new board**.
+- **🔗 Copy link** uses the browser's clipboard and shows "Link copied". If the clipboard is blocked, the link is shown selected in a small box, so it can be copied by hand.
+- **New board** asks first, then creates a board as above. Moving the old board is never repeated.
+
+### 5.20 Changes to existing parts [v3]
+- **Saving (§5.7)**: there is no local save of the board any more. Each action sends its mutation instead. The "can't save in this browser" notice now only matters for the browser's own settings: if `localStorage` is blocked, the board still works, but the browser gets a new identity on every visit.
+- **Sort by votes (§5.5)**: works out the new positions as before, then sends them with `moveNotes`, in chunks of 24.
+- **Clear board (§5.8)**: only shown to the facilitator. After `clearBoard` succeeds, the facilitator's browser removes the old notes in the background with `removeNotes`.
+- **Editing (§5.6)**: Save sends `editNote`. While it's on its way, the note shows its new text. If AWS refuses, the old text comes back with a message.
+- **Phone mode (§5.14)**: unchanged, apart from hiding the same buttons as on the whiteboard.
+
 ## 6. Look, accessibility and colours [v2 look]
 
 - **Whiteboard look**:
@@ -241,6 +372,11 @@ All of these are pure functions in `logic.js`, so they can be tested:
 - **Keyboard**: everything is a real `<button>` or `<textarea>`. Focus outlines are always visible, and focused items are panned into view.
 - **Headings**: one main heading, a heading for each frame, and one for each retro column. The health check uses table headings.
 - **Long words**: note text wraps long words and keeps line breaks.
+- **[v3] Top bar**:
+  - **🔗 Copy link** and **New board** sit next to **Sort by votes**.
+  - **Clear board** is shown only to the facilitator.
+- **[v3] Connection banner**: a full-width bar under the top bar. It uses the same style as the existing save notice, and screen readers announce it (`aria-live="polite"`).
+- **[v3] Disabled while offline**: buttons use the real `disabled` attribute, so they're skipped by Tab and announced as unavailable.
 
 ## 7. Testing
 
@@ -271,6 +407,43 @@ All of these are pure functions in `logic.js`, so they can be tested:
   - **Clear board** keeps the areas.
   - **Upgrading** a saved v1 board.
   - **Phone mode**: no transform, stacked lists in reading order, health blocks, no dragging, 44px buttons.
+
+### [v3] Automated tests for the shared board
+- **New `logic.js` tests** (`node --test`):
+  - `applyChange` for every change type
+  - skipping a change that has already been applied
+  - counts added from several people
+  - the last move wins
+  - Clear hides older generations
+  - a deleted area hides its notes
+  - showing **Edit** and **Delete** only for `mine`, and facilitator buttons only for `isFacilitator`
+  - splitting Sort moves into chunks of 24
+  - the 300-note limit
+- **New `storage.js` tests**: the browser secret is created once and kept; the last board is remembered; zoom is saved per board; the old board is moved only once.
+- **`fake-aws.js`**: a small Node program that stands in for AppSync on your Mac.
+  - It serves the app's files.
+  - It answers the same GraphQL queries and mutations over HTTP, and pushes live changes using the same WebSocket protocol as AppSync.
+  - It applies the same owner, facilitator, count and generation rules as the real resolvers.
+  - It can pretend to drop the connection.
+  - It needs no AWS account and costs nothing, so **CI keeps working without AWS**. It's written with Node's built-in modules only.
+- **New browser checks** (`tests/browser-check.js` against `fake-aws.js`, with **two browser tabs as two people**):
+  - Tab B sees Tab A's new card within 2 seconds.
+  - Tab B has no Edit or Delete on A's card, but can react to it.
+  - Both tabs react at once, and the count goes up by 2.
+  - B drags A's card, and A sees it move.
+  - Only A (the facilitator) sees Clear board, and clearing empties B's screen.
+  - A missing board shows its message.
+  - A dropped connection shows the banner and disables buttons; when it's back, the board catches up and typed text is kept.
+  - The old saved board moves once.
+  - Copy link works.
+  - Phone mode follows the same rules.
+- **Resolvers**: the real AppSync resolvers can only run on AWS, so they are checked by the manual two-window test below, and by AppSync's own **Run test** button in the console while setting up (§11).
+
+### [v3] Manual check on the real AWS, before release
+Two browser windows (one normal, one private, so they're two different people), plus a phone if one is to hand, all on the real AppSync:
+- every story in spec Stories 16–20
+- Stories 4, 6, 8, 11 and 15 as they apply to two people
+- AppSync's **Monitoring** page and the AWS **Billing** page checked afterwards, to see the usage and confirm it costs $0
 
 ### Manual checklist
 One line for each acceptance criterion in spec Stories 1–15, tested by hand:
@@ -303,6 +476,15 @@ One line for each acceptance criterion in spec Stories 1–15, tested by hand:
 | FR-016 Health notes | §5.13, §5.11 |
 | FR-017 Add, edit, delete areas | §5.13, §5.6 |
 | FR-018 Phone layout | §5.14 |
+| FR-019 Last board, new board, Copy link | §5.19, §6 |
+| FR-020 Live changes within 2 seconds; personal zoom | §5.15, §5.16, §4 |
+| FR-021 Owner checks on AWS | §5.17, §5.15 |
+| FR-022 Facilitator checks on AWS | §5.17, §5.15 |
+| FR-023 Counts add up; last move wins | §5.15, §5.16 |
+| FR-024 Lost connection, reconnect, can't reach | §5.18 |
+| FR-025 Move the old board once | §5.19 |
+| FR-026 300 notes; deleted after 90 days; missing board | §4, §5.15, §5.19 |
+| FR-027 Anonymous notes | §4 (no names stored), §5.17 |
 
 ## 9. Risks
 
@@ -319,6 +501,15 @@ One line for each acceptance criterion in spec Stories 1–15, tested by hand:
 | **[v2]** Dragging feels slow with many notes | Nothing is redrawn during a drag; only one transform changes. Checked with 150 notes. |
 | **[v2]** A note is dragged by accident while someone means to click | Drags start only after 4px of movement, and never from buttons or text boxes. |
 | **[v2]** `app.js` grows large | Split the health check into `health.js` if needed (§3). |
+| **[v3]** The API key is visible in the page's code, so someone could call the API directly | They'd still need a board's random code to see it, and the owner and facilitator checks run on AWS. There's no "list all boards" operation. The budget alert (§11) warns about unusual use. Sign-in (Cognito) can come later. |
+| **[v3]** Someone creates lots of boards or notes to run up costs | Each board is capped at 300 notes. AppSync limits request rates by default. The $1 budget alert emails you, and the API key can be deleted in one click to stop everything. |
+| **[v3]** GitHub's secret scanning may flag the API key in `config.js` | Expected, and safe to dismiss: this key is meant to be public. Its protection is described in the row above. |
+| **[v3]** Writing the WebSocket protocol by hand gets something subtle wrong | It follows AWS's published AppSync real-time protocol. `fake-aws.js` speaks the same protocol, and the manual check runs against the real AppSync. |
+| **[v3]** Changes are missed while the connection is half-alive | Keep-alive timeout (§5.18), and a full reload after every reconnect (§5.16). |
+| **[v3]** Notes left behind after a Clear, a deleted area or an expired board stay in the table | Invisible and unreachable; the facilitator's browser removes the first two kinds in the background. Anything left goes when the table is deleted at teardown. The amount is tiny. |
+| **[v3]** After teardown, the live site can't reach AWS and stops working | Before v3 is merged, `main` is tagged **`v2.0`** on GitHub. After teardown, a PR brings back the v2 files, so the site works again as a single-screen board. |
+| **[v3]** The AWS free plan ends, or costs appear | The teardown checklist (§11) is done before the plan ends, followed by a check of the Billing page. |
+| **[v3]** Mixing up personal and company AWS accounts on the work laptop | Everything is done in the AWS **web console**, in a private browser window, signed in to the **personal** account. No AWS command-line tools are used, and the `.aws` folder is never touched. |
 
 ## 10. Decisions confirmed by the Product Owner
 
@@ -327,3 +518,41 @@ Confirmed on 26 October 2026:
 1. **How it runs**: the Scrum Master double-clicks `index.html` on their laptop. It can also be put on any static web host later.
 2. **Browsers**: current Chrome, Edge, Safari and Firefox only.
 3. **Confirm dialogs**: the browser's built-in pop-up is used for every "Delete …?" question.
+
+For v3, see spec decisions 28–36 and the v3 defaults (29 October 2026).
+
+## 11. AWS setup, cost and teardown [v3]
+
+All of this is done by hand in the **AWS web console**, in a private browser window signed in to the **personal** AWS account. `aws/SETUP.md` will give click-by-click steps; this is the outline.
+
+### Setting up (about 30–45 minutes, once)
+1. **Pick one region** close to the team, for example Europe (London) or Asia Pacific (Mumbai), and use it for everything.
+2. **Budget alert first**: Billing and Cost Management → **Budgets** → a monthly cost budget of **$1**, emailing you at 80% and 100%.
+3. **DynamoDB**:
+   - Create the table **`RetroBoard`**, with partition key `pk` (String) and sort key `sk` (String).
+   - Choose **On-demand** capacity, so you only pay per request, and there's nothing to size.
+   - Turn on **Time to Live** for the attribute `expiresAt`.
+4. **AppSync**:
+   - Create a **GraphQL API** → **Design from scratch** → name it `retro-board`.
+   - Paste in `aws/schema.graphql`.
+   - Add the `RetroBoard` table as a **data source**. The console creates the access role for it.
+   - Attach each resolver from `aws/resolvers/`.
+   - Try a few with the console's **Queries** page and the resolvers' **Run test** button.
+5. **API key**: AppSync → Settings → create an **API key** that expires in about 6 months.
+6. **Connect the app**: copy the API's **GraphQL endpoint**, **real-time endpoint** and **API key** into `config.js`.
+7. **Logging**: leave AppSync logging **off**. It isn't needed, and it would store the secrets sent with each change in CloudWatch.
+
+### What it costs
+- During the AWS Free plan: **$0**. Usage comes out of the free credits, and the free plan never charges a card.
+- At list prices, one team's fortnightly retro would cost **well under $1 a month**.
+- The budget alert is the safety net.
+
+### Teardown (about 10 minutes, before the free plan ends)
+`aws/TEARDOWN.md` will give click-by-click steps:
+1. On GitHub: merge the PR that brings back the v2 files (§9), so the live site works without AWS.
+2. **AppSync**: delete the `retro-board` API. Its API key, resolvers and data source go with it.
+3. **DynamoDB**: delete the `RetroBoard` table, with every board in it.
+4. **IAM**: delete the role the console created for the data source; its name starts with `appsync-ds-ddb-`.
+5. **CloudWatch**: delete any log groups whose names start with `/aws/appsync/`. There should be none, if logging was left off.
+6. **Budgets**: keep the $1 budget until the next bill shows $0, then delete it if you like.
+7. **Check**: the AWS **Billing** page shows no running services, and **Cost Explorer** shows $0.

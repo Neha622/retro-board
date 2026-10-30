@@ -12,14 +12,31 @@
       <h1>Sprint Retro Board</h1>
     </div>
     <div class="panel toolbar">
+      <button id="copy-link-btn" type="button" class="btn"><span aria-hidden="true">🔗</span> Copy link</button>
+      <button id="new-board-btn" type="button" class="btn">New board</button>
       <button id="sort-btn" type="button" class="btn">Sort by votes</button>
-      <button id="clear-btn" type="button" class="btn btn-danger">Clear board</button>
+      <!-- Shown to the facilitator only (spec Story 8.5). -->
+      <button id="clear-btn" type="button" class="btn btn-danger" hidden>Clear board</button>
     </div>
   </header>
 
-  <p id="save-notice" class="notice" role="status" hidden></p>
+  <div class="notices">
+    <p id="connection-banner" class="notice notice-warning" role="status" aria-live="polite" hidden></p>
+    <p id="app-message" class="notice" role="status" aria-live="polite" hidden></p>
+    <div id="link-box" class="notice link-box" hidden>
+      <label for="link-input">Copy this link:</label>
+      <input id="link-input" class="link-input" type="text" readonly>
+    </div>
+    <p id="save-notice" class="notice" role="status" hidden></p>
+  </div>
 
-  <main id="board" class="board">
+  <!-- Shown instead of the board while it opens, or when it can't be opened (spec Stories 16.7, 19.4). -->
+  <section id="status-screen" class="status-screen" aria-live="polite" hidden>
+    <p id="status-text" class="status-text"></p>
+    <button id="status-btn" type="button" class="btn btn-primary" hidden></button>
+  </section>
+
+  <main id="board" class="board" hidden>
     <!-- On wide screens the viewport is the whiteboard: app.js and canvas.js pan and zoom the world. -->
     <div id="viewport" class="viewport">
       <div id="world" class="world">
@@ -47,7 +64,8 @@
               <!-- One row per area, built by app.js. -->
               <tbody id="health-rows"></tbody>
             </table>
-            <button id="add-area" type="button" class="btn add-area-btn">+ Add area</button>
+            <!-- Shown to the facilitator only (spec Story 15.0). -->
+            <button id="add-area" type="button" class="btn add-area-btn" hidden>+ Add area</button>
           </div>
         </section>
       </div>
@@ -63,8 +81,10 @@
 
   <div id="emoji-picker" class="picker" role="dialog" aria-label="Choose an emoji" hidden></div>
 
+  <script src="config.js"></script>
   <script src="logic.js"></script>
   <script src="storage.js"></script>
+  <script src="cloud.js"></script>
   <script src="canvas.js"></script>
   <script src="app.js"></script>
 </body>

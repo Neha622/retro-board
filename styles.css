@@ -135,8 +135,53 @@ textarea {
   border-radius: 6px;
 }
 
-.notice[hidden] {
-  display: none;
+/* `hidden` always wins over a class's display, for the board, buttons and notices alike. */
+[hidden] {
+  display: none !important;
+}
+
+/* [v3] Connection lost: the same notice colours, with a red edge to stand out. */
+.notice-warning {
+  border-left-color: var(--not-well);
+  font-weight: 600;
+}
+
+.link-box {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+/* [v3] Opening the board, a missing board, or no connection (spec Stories 16.7, 19.4). */
+.status-screen {
+  max-width: 480px;
+  margin: 64px auto;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-panel);
+}
+
+.status-text {
+  margin: 0 0 16px;
+  font-size: 1.1rem;
+}
+
+.status-text:last-child {
+  margin-bottom: 0;
 }
 
 /* --- Buttons ------------------------------------------------------------- */
@@ -615,19 +660,33 @@ body.is-canvas {
   pointer-events: auto;
 }
 
-.is-canvas .notice {
+/* Notices float over the whiteboard, stacked under the top bar. */
+.is-canvas .notices {
   position: fixed;
   z-index: 20;
   top: 72px;
   left: 50%;
   transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: max-content;
   max-width: min(640px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.is-canvas .notice {
   margin: 0;
   box-shadow: var(--shadow-panel);
+  pointer-events: auto;
 }
 
 .is-canvas .board {
   padding: 0;
+}
+
+.is-canvas .status-screen {
+  margin-top: 120px;
 }
 
 .is-canvas .viewport {
