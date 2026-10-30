@@ -136,3 +136,80 @@ test('load: notes not placed yet and an empty area list are fine', () => {
   };
   assert.equal(S.load(saved(data)).damaged, false);
 });
+
+// --- v3: this browser's own settings (plan §4) ------------------------------
+
+function idMaker() {
+  let n = 0;
+  return () => { n += 1; return 'secret-number-' + n; };
+}
+
+// T069 — the browser secret, last board, zoom per board, and moving the old board once
+test('loadSettings: the secret is created once, then kept', () => {
+  const store = fakeStore();
+  const makeId = idMaker();
+  const first = S.loadSettings(store, makeId);
+  assert.deepEqual(first, { secret: 'secret-number-1', lastBoardId: null, moved: false });
+  assert.deepEqual(S.loadSettings(store, makeId), first);
+});
+
+test('saveSettings: the last board and the move are remembered', () => {
+  const store = fakeStore();
+  const settings = S.loadSettings(store, idMaker());
+  assert.equal(S.saveSettings(store, { ...settings, lastBoardId: 'board-7', moved: true }), true);
+  assert.deepEqual(S.loadSettings(store, idMaker()), { secret: 'secret-number-1', lastBoardId: 'board-7', moved: true });
+});
+
+test('loadSettings: damaged settings are replaced with new ones', () => {
+  for (const raw of ['{not json', '{"secret":5}', '{"secret":"s","lastBoardId":3,"moved":false}']) {
+    const store = fakeStore({ [S.SETTINGS_KEY]: raw });
+    assert.equal(S.loadSettings(store, idMaker()).secret, 'secret-number-1', raw);
+  }
+});
+
+test('loadSettings: with saving blocked, it still works, with a new identity each time', () => {
+  const makeId = idMaker();
+  assert.equal(S.loadSettings(null, makeId).secret, 'secret-number-1');
+  assert.equal(S.loadSettings(brokenStore(), makeId).secret, 'secret-number-2');
+  assert.equal(S.saveSettings(null, { secret: 'x', lastBoardId: null, moved: false }), false);
+});
+
+test('views: zoom and position are kept per board', () => {
+  const store = fakeStore();
+  assert.equal(S.loadView(store, 'board-1'), null);
+  assert.equal(S.saveView(store, 'board-1', { zoom: 0.5, x: 10, y: -20 }), true);
+  S.saveView(store, 'board-2', { zoom: 1.5, x: 0, y: 0 });
+  assert.deepEqual(S.loadView(store, 'board-1'), { zoom: 0.5, x: 10, y: -20 });
+  assert.deepEqual(S.loadView(store, 'board-2'), { zoom: 1.5, x: 0, y: 0 });
+});
+
+test('views: a damaged or missing view gives null, and blocked saving is reported', () => {
+  assert.equal(S.loadView(fakeStore({ [S.VIEW_KEY_PREFIX + 'b']: '{"zoom":0}' }), 'b'), null);
+  assert.equal(S.loadView(null, 'b'), null);
+  assert.equal(S.saveView(brokenStore(), 'b', { zoom: 1, x: 0, y: 0 }), false);
+});
+
+test('boardToMove: a saved v2 board is offered until it has been moved, and is never changed', () => {
+  const raw = JSON.stringify(sampleBoard());
+  const store = fakeStore({ [S.KEY]: raw });
+  const settings = S.loadSettings(store, idMaker());
+  const { view, ...expected } = sampleBoard();
+  assert.deepEqual({ ...S.boardToMove(store, settings), view: undefined }, { ...expected, view: undefined });
+  assert.equal(S.boardToMove(store, { ...settings, moved: true }), null);
+  assert.equal(store.items[S.KEY], raw);
+});
+
+test('boardToMove: a saved v1 board is upgraded first', () => {
+  const v1Card = { id: 'a', column: 'well', text: 'Old', createdAt: 1, reactions: { thumbsUp: 1, heart: 0, laugh: 0, party: 0, wow: 0 } };
+  const store = saved({ version: 1, cards: [v1Card] });
+  const board = S.boardToMove(store, S.loadSettings(store, idMaker()));
+  assert.equal(board.version, 2);
+  assert.deepEqual(board.cards.map((c) => c.id), ['a']);
+});
+
+test('boardToMove: nothing to move when nothing is saved, or the saved board is damaged', () => {
+  assert.equal(S.boardToMove(fakeStore(), S.loadSettings(fakeStore(), idMaker())), null);
+  const damaged = fakeStore({ [S.KEY]: '{not json' });
+  assert.equal(S.boardToMove(damaged, S.loadSettings(damaged, idMaker())), null);
+  assert.equal(S.boardToMove(null, { secret: 's', lastBoardId: null, moved: false }), null);
+});

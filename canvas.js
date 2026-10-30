@@ -22,7 +22,8 @@
   //   onViewChange(view, byUser)
   //   canDrop(noteEl, zoneEl) -> boolean
   //   onDrop(noteEl, zoneEl, x, y)   x, y: the note's new top-left inside the zone, in world units
-  function createCanvas({ viewport, world, topInset, onViewChange, canDrop, onDrop }) {
+  //   onSettle()        a press or drag on a note has ended, however it ended
+  function createCanvas({ viewport, world, topInset, onViewChange, canDrop, onDrop, onSettle = () => {} }) {
     let view = { zoom: 1, x: 0, y: 0 };
     let enabled = false;
     let gesture = null;
@@ -157,8 +158,12 @@
       if (!gesture || e.pointerId !== gesture.pointerId) return;
       const g = gesture;
       endGesture();
-      if (g.type !== 'note' || !g.dragging) return;
+      if (g.type !== 'note') return;
+      if (g.dragging) drop(g, e);
+      onSettle();
+    }
 
+    function drop(g, e) {
       const zone = zoneAt(g.note, e.clientX, e.clientY);
       if (!zone) {
         slideBack(g.note);
@@ -179,8 +184,16 @@
     }
 
     function cancelGesture() {
-      if (gesture && gesture.type === 'note' && gesture.dragging) slideBack(gesture.note);
+      const onNote = gesture && gesture.type === 'note';
+      if (onNote && gesture.dragging) slideBack(gesture.note);
       endGesture();
+      if (onNote) onSettle();
+    }
+
+    // The id of the note being pressed or dragged, if any. While there is one, the app
+    // mustn't redraw that note, or the drag would lose it.
+    function activeNoteId() {
+      return gesture && gesture.type === 'note' ? gesture.note.dataset.noteId : null;
     }
 
     function slideBack(note) {
@@ -258,6 +271,7 @@
       zoomStep,
       fit,
       panIntoView,
+      activeNoteId,
     };
   }
 

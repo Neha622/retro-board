@@ -1,0 +1,72 @@
+# Sprint Retro Board — AppSync GraphQL schema (plan §5.15).
+# Paste this whole file into AppSync → your API → Schema, then click Save Schema.
+#
+# Secrets (the browser secret) only ever appear as INPUTS. No output type has a
+# field for them, so AppSync can never send a secret back to anyone (plan §5.17).
+
+type Board {
+  boardId: ID!
+  # Goes up by 1 on each Clear board. Only notes with this generation are shown.
+  generation: Int!
+  noteCount: Int!
+  # { "<areaId>": { "name", "awesome", "crappy", "order" } }
+  areas: AWSJSON!
+  # { "<areaId>": { "awesome", "fine", "sad" } }
+  votes: AWSJSON!
+  # Worked out on AWS by comparing the caller's secret with the board's.
+  isFacilitator: Boolean!
+  updatedAt: AWSTimestamp!
+}
+
+type NotePage {
+  # A list of notes. Each has id, kind, column, areaId, text, createdAt,
+  # x, y, z, reactions, and "mine" (worked out on AWS).
+  notes: AWSJSON!
+  nextToken: String
+}
+
+# Every mutation returns a Change, and the subscription delivers it to
+# everyone watching the same board.
+type Change {
+  boardId: ID!
+  # Made by the browser, so it can skip a change it has already applied.
+  changeId: ID!
+  # notesAdded, noteEdited, noteDeleted, notesMoved, reacted, voted,
+  # boardCleared, areaSaved, areaDeleted, boardCreated or notesRemoved
+  type: String!
+  data: AWSJSON!
+}
+
+type Query {
+  getBoard(boardId: ID!, secret: String!): Board
+  listNotes(boardId: ID!, secret: String!, generation: Int!, nextToken: String): NotePage!
+}
+
+type Mutation {
+  # Anyone. The caller becomes the facilitator.
+  createBoard(boardId: ID!, secret: String!, changeId: ID!, areas: AWSJSON!, votes: AWSJSON!): Change
+  # Anyone. 1–24 notes, owned by the caller.
+  addNotes(boardId: ID!, secret: String!, changeId: ID!, generation: Int!, notes: AWSJSON!): Change
+  # The note's owner only.
+  editNote(boardId: ID!, secret: String!, changeId: ID!, noteId: ID!, text: String!): Change
+  deleteNote(boardId: ID!, secret: String!, changeId: ID!, generation: Int!, noteId: ID!): Change
+  # Anyone. 1–24 moves.
+  moveNotes(boardId: ID!, changeId: ID!, moves: AWSJSON!): Change
+  # Anyone. delta is 1 or -1.
+  react(boardId: ID!, changeId: ID!, noteId: ID!, reaction: String!, delta: Int!): Change
+  vote(boardId: ID!, changeId: ID!, areaId: ID!, kind: String!, delta: Int!): Change
+  # The facilitator only.
+  clearBoard(boardId: ID!, secret: String!, changeId: ID!, areaIds: [ID!]!): Change
+  saveArea(boardId: ID!, secret: String!, changeId: ID!, area: AWSJSON!, isNew: Boolean!): Change
+  deleteArea(boardId: ID!, secret: String!, changeId: ID!, areaId: ID!, removedNotes: Int!): Change
+  # Background clean-up after a Clear or a deleted area. Not sent to other screens.
+  removeNotes(boardId: ID!, secret: String!, changeId: ID!, noteIds: [ID!]!): Change
+}
+
+type Subscription {
+  onChange(boardId: ID!): Change
+    @aws_subscribe(mutations: [
+      "addNotes", "editNote", "deleteNote", "moveNotes", "react", "vote",
+      "clearBoard", "saveArea", "deleteArea"
+    ])
+}

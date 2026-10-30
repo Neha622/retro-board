@@ -144,7 +144,88 @@
     }
   }
 
-  const RetroStorage = { KEY, BACKUP_KEY, canSave, isValidBoard, load, save };
+  // --- v3: this browser's own settings (plan §4) ----------------------------
+  // The board itself now lives on AWS. This browser keeps only its secret, its last board,
+  // whether its old board has been moved, and its zoom and position for each board.
+
+  const SETTINGS_KEY = 'retro-browser';
+  const VIEW_KEY_PREFIX = 'retro-view-';
+
+  function readJson(store, key) {
+    if (!store) return null;
+    try {
+      const raw = store.getItem(key);
+      return raw === null ? null : JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeJson(store, key, value) {
+    if (!store) return false;
+    try {
+      store.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function isValidSettings(data) {
+    return (
+      isObject(data) &&
+      typeof data.secret === 'string' && data.secret !== '' &&
+      (data.lastBoardId === null || typeof data.lastBoardId === 'string') &&
+      typeof data.moved === 'boolean'
+    );
+  }
+
+  // Returns { secret, lastBoardId, moved }. A new secret is made, with `makeId`, only when there
+  // are no valid settings yet. When saving is blocked, every visit gets a new identity (spec Story 18).
+  function loadSettings(store, makeId) {
+    const data = readJson(store, SETTINGS_KEY);
+    if (isValidSettings(data)) return { secret: data.secret, lastBoardId: data.lastBoardId, moved: data.moved };
+    const settings = { secret: makeId(), lastBoardId: null, moved: false };
+    writeJson(store, SETTINGS_KEY, settings);
+    return settings;
+  }
+
+  function saveSettings(store, settings) {
+    return writeJson(store, SETTINGS_KEY, settings);
+  }
+
+  function loadView(store, boardId) {
+    const view = readJson(store, VIEW_KEY_PREFIX + boardId);
+    return view !== null && isValidView(view) ? view : null;
+  }
+
+  function saveView(store, boardId, view) {
+    return writeJson(store, VIEW_KEY_PREFIX + boardId, view);
+  }
+
+  // The v1 or v2 board saved in this browser, upgraded if needed, if it hasn't been moved to a
+  // shared board yet (spec Story 20). The saved copy itself is never changed.
+  function boardToMove(store, settings) {
+    if (settings.moved || readJson(store, KEY) === null) return null;
+    const { board, damaged } = load(store);
+    return damaged ? null : board;
+  }
+
+  const RetroStorage = {
+    KEY,
+    BACKUP_KEY,
+    SETTINGS_KEY,
+    VIEW_KEY_PREFIX,
+    canSave,
+    isValidBoard,
+    load,
+    save,
+    loadSettings,
+    saveSettings,
+    loadView,
+    saveView,
+    boardToMove,
+  };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = RetroStorage;
   else root.RetroStorage = RetroStorage;

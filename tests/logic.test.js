@@ -532,3 +532,268 @@ test('findFreeSpot: keeps a full gap below the lowest note, even off the scan gr
   const spot = L.findFreeSpot(rects, { width: W, height: 100 });
   assert.ok(spot.y >= G + 105 + G, `got ${spot.y}`);
 });
+
+// --- v3: the shared board -------------------------------------------------
+
+// What getBoard and listNotes send back (plan §5.15), already parsed from JSON.
+function serverBoard(extra = {}) {
+  return {
+    boardId: 'board-1',
+    generation: 0,
+    isFacilitator: false,
+    areas: {
+      'area-b': { name: 'Speed', awesome: 'Fast', crappy: 'Slow', order: 1 },
+      'area-a': { name: 'Fun', awesome: 'Yay', crappy: 'Meh', order: 0 },
+    },
+    votes: { 'area-a': { awesome: 2, fine: 0, sad: 1 } },
+    ...extra,
+  };
+}
+
+function serverCard(id, extra = {}) {
+  return {
+    id, kind: 'card', column: 'well', areaId: null, text: 'card ' + id, createdAt: 10,
+    x: 16, y: 16, z: 1, reactions: { thumbsUp: 0, heart: 0, laugh: 0, party: 0, wow: 0 }, mine: false, ...extra,
+  };
+}
+
+function serverHealthNote(id, extra = {}) {
+  return { ...serverCard(id), kind: 'health', column: null, areaId: 'area-a', ...extra };
+}
+
+let nextChange = 0;
+function change(type, data) {
+  nextChange += 1;
+  return { changeId: 'change-' + nextChange, type, data };
+}
+
+function sharedBoard(notes = [], extra = {}) {
+  return L.boardFromServer(serverBoard(extra), notes);
+}
+
+// T064 — building the board from AWS, and applying each kind of change (plan §5.16)
+test('boardFromServer: cards, health notes, areas in order with their votes, and sync details', () => {
+  const board = sharedBoard([serverCard('c1', { mine: true }), serverHealthNote('h1')], { isFacilitator: true });
+  assert.deepEqual(board.cards.map((c) => [c.id, c.column, c.mine]), [['c1', 'well', true]]);
+  assert.deepEqual(board.health.notes.map((n) => [n.id, n.areaId, n.mine]), [['h1', 'area-a', false]]);
+  assert.deepEqual(board.health.areas.map((a) => a.name), ['Fun', 'Speed']);
+  assert.deepEqual(board.health.areas[0].votes, { awesome: 2, fine: 0, sad: 1 });
+  assert.deepEqual(board.health.areas[1].votes, { awesome: 0, fine: 0, sad: 0 });
+  assert.deepEqual(board.sync, { boardId: 'board-1', generation: 0, isFacilitator: true, applied: [] });
+  assert.equal(board.view, null);
+});
+
+test('areasToServer: areas and votes go to AWS in order, and come back the same', () => {
+  let board = L.vote(L.emptyBoard(), 'area-fun', 'sad', +1);
+  const { areas, votes } = L.areasToServer(board);
+  assert.equal(Object.keys(areas).length, 11);
+  assert.deepEqual(areas['area-fun'], { name: 'Fun', awesome: L.DEFAULT_AREAS[2].awesome, crappy: L.DEFAULT_AREAS[2].crappy, order: 2 });
+  assert.deepEqual(votes['area-fun'], { awesome: 0, fine: 0, sad: 1 });
+  const back = L.boardFromServer({ boardId: 'b', generation: 0, isFacilitator: true, areas, votes }, []);
+  assert.deepEqual(back.health.areas.map((a) => a.name), L.DEFAULT_AREAS.map((a) => a.name));
+});
+
+test('noteToServer: a card and a health note, as addNotes expects them', () => {
+  const c = { ...card('c1', 'notWell', 5, 2), x: 16, y: 32, z: 3, mine: true };
+  assert.deepEqual(L.noteToServer(c), {
+    id: 'c1', kind: 'card', column: 'notWell', text: 'text c1', createdAt: 5,
+    x: 16, y: 32, z: 3, reactions: c.reactions,
+  });
+  const h = L.createHealthNote({ id: 'h1', areaId: 'area-fun', text: 'Hi', createdAt: 6 });
+  assert.deepEqual(L.noteToServer(h), {
+    id: 'h1', kind: 'health', areaId: 'area-fun', text: 'Hi', createdAt: 6,
+    x: null, y: null, z: 0, reactions: h.reactions,
+  });
+});
+
+test('applyChange notesAdded: someone else\'s notes arrive as not mine', () => {
+  const board = L.applyChange(sharedBoard(), change('notesAdded', { generation: 0, notes: [serverCard('c1'), serverHealthNote('h1')] }));
+  assert.deepEqual(board.cards.map((c) => [c.id, c.mine]), [['c1', false]]);
+  assert.deepEqual(board.health.notes.map((n) => [n.id, n.mine]), [['h1', false]]);
+});
+
+test('applyChange notesAdded: my own confirmed notes are marked mine', () => {
+  const board = L.applyChange(sharedBoard(), change('notesAdded', { generation: 0, notes: [serverCard('c1')] }), { mine: true });
+  assert.equal(board.cards[0].mine, true);
+});
+
+test('applyChange notesAdded: a note already on the board is not added twice', () => {
+  const board = L.applyChange(sharedBoard([serverCard('c1')]), change('notesAdded', { generation: 0, notes: [serverCard('c1')] }));
+  assert.equal(board.cards.length, 1);
+});
+
+test('applyChange noteEdited and noteDeleted', () => {
+  let board = sharedBoard([serverCard('c1'), serverHealthNote('h1')]);
+  board = L.applyChange(board, change('noteEdited', { noteId: 'c1', text: 'New 🎉' }));
+  assert.equal(board.cards[0].text, 'New 🎉');
+  board = L.applyChange(board, change('noteDeleted', { noteId: 'h1' }));
+  assert.equal(board.health.notes.length, 0);
+});
+
+test('applyChange notesMoved: position and column change, and z comes along', () => {
+  const board = L.applyChange(sharedBoard([serverCard('c1')]), change('notesMoved', {
+    moves: [{ id: 'c1', x: 232, y: 80, z: 9, column: 'improve' }],
+  }));
+  assert.deepEqual(pick(board.cards[0], 'column', 'x', 'y', 'z'), { column: 'improve', x: 232, y: 80, z: 9 });
+});
+
+test('applyChange notesMoved: a health note moves to another area', () => {
+  const board = L.applyChange(sharedBoard([serverHealthNote('h1')]), change('notesMoved', {
+    moves: [{ id: 'h1', x: 16, y: 16, z: 2, areaId: 'area-b' }],
+  }));
+  assert.equal(board.health.notes[0].areaId, 'area-b');
+});
+
+test('applyChange reacted and voted', () => {
+  let board = sharedBoard([serverCard('c1')]);
+  board = L.applyChange(board, change('reacted', { noteId: 'c1', reaction: 'heart', delta: 1 }));
+  assert.equal(board.cards[0].reactions.heart, 1);
+  board = L.applyChange(board, change('voted', { areaId: 'area-b', kind: 'fine', delta: 1 }));
+  assert.equal(board.health.areas[1].votes.fine, 1);
+});
+
+test('applyChange boardCleared: notes and votes go, areas stay, generation moves on', () => {
+  const board = L.applyChange(
+    sharedBoard([serverCard('c1'), serverHealthNote('h1')]),
+    change('boardCleared', { generation: 1, areaIds: ['area-a', 'area-b'] }),
+  );
+  assert.equal(board.cards.length + board.health.notes.length, 0);
+  assert.deepEqual(board.health.areas.map((a) => a.votes), [{ awesome: 0, fine: 0, sad: 0 }, { awesome: 0, fine: 0, sad: 0 }]);
+  assert.deepEqual(board.health.areas.map((a) => a.name), ['Fun', 'Speed']);
+  assert.equal(board.sync.generation, 1);
+});
+
+test('applyChange areaSaved: a new area is added in order; an edited one keeps its votes', () => {
+  let board = sharedBoard();
+  board = L.applyChange(board, change('areaSaved', {
+    isNew: true, area: { id: 'area-c', name: 'New area', awesome: '', crappy: '', order: 2 },
+  }));
+  assert.deepEqual(board.health.areas.map((a) => a.id), ['area-a', 'area-b', 'area-c']);
+  assert.deepEqual(board.health.areas[2].votes, { awesome: 0, fine: 0, sad: 0 });
+  board = L.applyChange(board, change('areaSaved', {
+    isNew: false, area: { id: 'area-a', name: 'Fun 🎉', awesome: 'A', crappy: 'C', order: 0 },
+  }));
+  assert.deepEqual(pick(board.health.areas[0], 'name', 'awesome', 'crappy'), { name: 'Fun 🎉', awesome: 'A', crappy: 'C' });
+  assert.deepEqual(board.health.areas[0].votes, { awesome: 2, fine: 0, sad: 1 });
+});
+
+test('applyChange areaDeleted: the area and its health notes are hidden at once', () => {
+  const board = L.applyChange(sharedBoard([serverHealthNote('h1')]), change('areaDeleted', { areaId: 'area-a' }));
+  assert.deepEqual(board.health.areas.map((a) => a.id), ['area-b']);
+  assert.equal(board.health.notes.length, 0);
+});
+
+test('nextAreaOrder: one after the highest order on the board', () => {
+  assert.equal(L.nextAreaOrder(sharedBoard()), 2);
+  assert.equal(L.nextAreaOrder(L.boardFromServer({ ...serverBoard(), areas: {}, votes: {} }, [])), 0);
+});
+
+// T065 — sync rules (plan §5.16)
+test('applyChange: a change that was already applied is skipped', () => {
+  const added = change('reacted', { noteId: 'c1', reaction: 'thumbsUp', delta: 1 });
+  let board = sharedBoard([serverCard('c1')]);
+  board = L.applyChange(board, added, { mine: true });
+  board = L.applyChange(board, added); // the same change arriving again through the subscription
+  assert.equal(board.cards[0].reactions.thumbsUp, 1);
+});
+
+test('applyChange: +1s from several people add up, and −1 never goes below 0', () => {
+  let board = sharedBoard([serverCard('c1')]);
+  for (let i = 0; i < 3; i++) board = L.applyChange(board, change('reacted', { noteId: 'c1', reaction: 'thumbsUp', delta: 1 }));
+  assert.equal(board.cards[0].reactions.thumbsUp, 3);
+  for (let i = 0; i < 5; i++) board = L.applyChange(board, change('reacted', { noteId: 'c1', reaction: 'thumbsUp', delta: -1 }));
+  assert.equal(board.cards[0].reactions.thumbsUp, 0);
+});
+
+test('applyChange: the last move wins', () => {
+  let board = sharedBoard([serverCard('c1')]);
+  board = L.applyChange(board, change('notesMoved', { moves: [{ id: 'c1', x: 16, y: 100, z: 2, column: 'well' }] }));
+  board = L.applyChange(board, change('notesMoved', { moves: [{ id: 'c1', x: 232, y: 300, z: 3, column: 'notWell' }] }));
+  assert.deepEqual(pick(board.cards[0], 'column', 'x', 'y'), { column: 'notWell', x: 232, y: 300 });
+});
+
+test('applyChange: a note I am dragging ignores moves from others until I drop it', () => {
+  const board = L.applyChange(
+    sharedBoard([serverCard('c1'), serverCard('c2')]),
+    change('notesMoved', { moves: [{ id: 'c1', x: 232, y: 300, z: 3, column: 'well' }, { id: 'c2', x: 232, y: 16, z: 4, column: 'well' }] }),
+    { draggingId: 'c1' },
+  );
+  assert.deepEqual(pick(board.cards[0], 'x', 'y'), { x: 16, y: 16 });
+  assert.deepEqual(pick(board.cards[1], 'x', 'y'), { x: 232, y: 16 });
+});
+
+test('applyChange: notes added before a Clear (older generation) are not shown', () => {
+  let board = L.applyChange(sharedBoard(), change('boardCleared', { generation: 1, areaIds: [] }));
+  board = L.applyChange(board, change('notesAdded', { generation: 0, notes: [serverCard('late')] }));
+  assert.equal(board.cards.length, 0);
+});
+
+test('applyChange: changes to notes or areas that are gone do nothing', () => {
+  const board = sharedBoard([serverCard('c1')]);
+  for (const c of [
+    change('noteEdited', { noteId: 'gone', text: 'x' }),
+    change('reacted', { noteId: 'gone', reaction: 'heart', delta: 1 }),
+    change('voted', { areaId: 'gone', kind: 'sad', delta: 1 }),
+    change('notesMoved', { moves: [{ id: 'gone', x: 1, y: 1, z: 1, column: 'well' }] }),
+  ]) {
+    const after = L.applyChange(board, c);
+    assert.deepEqual({ cards: after.cards, health: after.health }, { cards: board.cards, health: board.health }, c.type);
+  }
+});
+
+test('applyChange: unknown change types are remembered but change nothing', () => {
+  const board = sharedBoard([serverCard('c1')]);
+  const after = L.applyChange(board, change('notesRemoved', { noteIds: ['c1'] }));
+  assert.equal(after.cards.length, 1);
+});
+
+test('applyChange: only the most recent change ids are remembered', () => {
+  let board = sharedBoard([serverCard('c1')]);
+  for (let i = 0; i < 250; i++) board = L.applyChange(board, change('reacted', { noteId: 'c1', reaction: 'wow', delta: 1 }));
+  assert.equal(board.sync.applied.length, 200);
+});
+
+// T066 — who sees which buttons (spec Stories 6, 8, 15, 18)
+test('canChangeNote: only my own notes', () => {
+  const board = sharedBoard([serverCard('mine', { mine: true }), serverCard('theirs')]);
+  assert.equal(L.canChangeNote(board.cards[0]), true);
+  assert.equal(L.canChangeNote(board.cards[1]), false);
+});
+
+test('canManageBoard: only the facilitator clears the board and changes areas', () => {
+  assert.equal(L.canManageBoard(sharedBoard([], { isFacilitator: true })), true);
+  assert.equal(L.canManageBoard(sharedBoard()), false);
+});
+
+// T067 — chunking and the 300-note limit
+test('chunk: pieces of 24 at most, in order', () => {
+  const list = Array.from({ length: 50 }, (_, i) => i);
+  const pieces = L.chunk(list);
+  assert.deepEqual(pieces.map((p) => p.length), [24, 24, 2]);
+  assert.deepEqual(pieces.flat(), list);
+  assert.deepEqual(L.chunk([]), []);
+});
+
+test('cardMoves: every card\'s place, ready for moveNotes after Sort by votes', () => {
+  let board = sharedBoard([serverCard('c1', { x: 232, y: 16 }), serverCard('c2', { column: 'improve' })]);
+  board = L.sortByVotes(board);
+  assert.deepEqual(L.cardMoves(board), board.cards.map((c) => ({ id: c.id, x: c.x, y: c.y, z: c.z, column: c.column })));
+});
+
+test('isBoardFull: a board holds 300 notes, cards and health notes together', () => {
+  const notes = (n, make) => Array.from({ length: n }, (_, i) => make('n' + i));
+  const at299 = sharedBoard([...notes(200, serverCard), ...notes(99, (id) => serverHealthNote('h' + id))]);
+  assert.equal(L.MAX_NOTES, 300);
+  assert.equal(L.isBoardFull(at299), false);
+  assert.equal(L.isBoardFull(at299, 2), true);
+  const at300 = L.applyChange(at299, change('notesAdded', { generation: 0, notes: [serverCard('last')] }));
+  assert.equal(L.isBoardFull(at300), true);
+});
+
+test('applyChange: my new notes are still marked mine when the live copy arrives before the answer', () => {
+  const added = change('notesAdded', { generation: 0, notes: [serverCard('c1')] });
+  let board = L.applyChange(sharedBoard(), added); // live copy first: not known to be mine yet
+  board = L.applyChange(board, added, { mine: true }); // then AWS's answer to me
+  assert.equal(board.cards.length, 1);
+  assert.equal(board.cards[0].mine, true);
+});

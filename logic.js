@@ -100,6 +100,11 @@
   const ZOOM_MAX = 2;
   const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
+  // Shared board limits (spec Story 17.4; plan §5.15).
+  const MAX_NOTES = 300;
+  const MAX_PER_CHANGE = 24; // + 1 board item = 25, the most AppSync allows in one transaction
+  const MAX_REMEMBERED = 200;
+
   // --- Characters ---------------------------------------------------------
 
   const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
@@ -417,6 +422,136 @@
     };
   }
 
+  // --- Shared board (plan §5.15–5.17) ---------------------------------------
+  // A shared board is a v2 board plus `board.sync` ({ boardId, generation, isFacilitator, applied })
+  // and `mine` on every note. AWS works out `mine` and `isFacilitator`; secrets never reach here.
+
+  function noteFromServer(n, mine) {
+    const common = { id: n.id, text: n.text, createdAt: n.createdAt, reactions: { ...n.reactions }, x: n.x, y: n.y, z: n.z, mine };
+    return n.kind === 'card' ? { ...common, column: n.column } : { ...common, areaId: n.areaId };
+  }
+
+  function byOrder(areas) {
+    return [...areas].sort((a, b) => a.order - b.order);
+  }
+
+  // `info` is getBoard's answer and `notes` is every page of listNotes, both parsed from JSON.
+  function boardFromServer(info, notes) {
+    const areas = byOrder(Object.entries(info.areas).map(([id, a]) => ({
+      ...createArea({ id, name: a.name, awesome: a.awesome, crappy: a.crappy }),
+      votes: { ...emptyCounts(HEALTH_VOTES), ...info.votes[id] },
+      order: a.order,
+    })));
+    return {
+      version: 2,
+      cards: notes.filter((n) => n.kind === 'card').map((n) => noteFromServer(n, n.mine)),
+      health: { areas, notes: notes.filter((n) => n.kind === 'health').map((n) => noteFromServer(n, n.mine)) },
+      view: null,
+      sync: { boardId: info.boardId, generation: info.generation, isFacilitator: info.isFacilitator, applied: [] },
+    };
+  }
+
+  // The areas and votes of a board, as createBoard expects them.
+  function areasToServer(board) {
+    const areas = {};
+    const votes = {};
+    board.health.areas.forEach((a, i) => {
+      areas[a.id] = { name: a.name, awesome: a.awesome, crappy: a.crappy, order: i };
+      votes[a.id] = { ...a.votes };
+    });
+    return { areas, votes };
+  }
+
+  // A note as addNotes expects it.
+  function noteToServer(note) {
+    const place = 'column' in note ? { kind: 'card', column: note.column } : { kind: 'health', areaId: note.areaId };
+    return {
+      id: note.id, ...place, text: note.text, createdAt: note.createdAt,
+      x: note.x, y: note.y, z: note.z, reactions: note.reactions,
+    };
+  }
+
+  function nextAreaOrder(board) {
+    return board.health.areas.reduce((max, a) => Math.max(max, a.order + 1), 0);
+  }
+
+  function moveFromServer(board, m) {
+    const zoneField = isCard(board, m.id) ? 'column' : 'areaId';
+    return updateNote(board, m.id, (n) => ({ ...n, [zoneField]: m[zoneField], x: m.x, y: m.y, z: m.z }));
+  }
+
+  function saveAreaFromServer(board, area) {
+    const known = board.health.areas.some((a) => a.id === area.id);
+    const next = known
+      ? updateArea(board, area.id, (a) => ({ ...a, name: area.name, awesome: area.awesome, crappy: area.crappy, order: area.order }))
+      : addArea(board, { ...createArea(area), order: area.order });
+    return withHealth(next, (h) => ({ areas: byOrder(h.areas) }));
+  }
+
+  function applyData(board, type, data, { mine, draggingId }) {
+    switch (type) {
+      case 'notesAdded': {
+        if (data.generation !== board.sync.generation) return board;
+        return data.notes.reduce((b, n) => {
+          if (findNote(b, n.id)) return b;
+          const note = noteFromServer(n, mine);
+          return n.kind === 'card' ? addCard(b, note) : addHealthNote(b, note);
+        }, board);
+      }
+      case 'noteEdited': return editNote(board, data.noteId, data.text);
+      case 'noteDeleted': return deleteNote(board, data.noteId);
+      case 'notesMoved':
+        return data.moves.reduce((b, m) => (m.id === draggingId ? b : moveFromServer(b, m)), board);
+      case 'reacted': return react(board, data.noteId, data.reaction, data.delta);
+      case 'voted': return vote(board, data.areaId, data.kind, data.delta);
+      case 'boardCleared': return { ...clearBoard(board), sync: { ...board.sync, generation: data.generation } };
+      case 'areaSaved': return saveAreaFromServer(board, data.area);
+      case 'areaDeleted': return deleteArea(board, data.areaId);
+      default: return board; // boardCreated, notesRemoved: nothing to show
+    }
+  }
+
+  // Applies one change from AWS, whether it's my own (confirmed) or someone else's (plan §5.16).
+  // Each change is applied once: my own arrives twice, once as the answer and once live.
+  // `mine`: the change is my own, so notes it adds are mine. `draggingId`: a note I'm dragging,
+  // which ignores moves from others until I drop it.
+  function applyChange(board, change, { mine = false, draggingId = null } = {}) {
+    if (board.sync.applied.includes(change.changeId)) {
+      // The live copy of my own change can arrive before AWS's answer to me. Its notes were
+      // added as someone else's; now that the answer says they're mine, mark them so.
+      if (!mine || change.type !== 'notesAdded') return board;
+      const ids = new Set(change.data.notes.map((n) => n.id));
+      const markMine = (n) => (ids.has(n.id) ? { ...n, mine: true } : n);
+      return withHealth({ ...board, cards: board.cards.map(markMine) }, (h) => ({ notes: h.notes.map(markMine) }));
+    }
+    const next = applyData(board, change.type, change.data, { mine, draggingId });
+    const applied = [...board.sync.applied, change.changeId].slice(-MAX_REMEMBERED);
+    return { ...next, sync: { ...next.sync, applied } };
+  }
+
+  function canChangeNote(note) {
+    return note.mine === true;
+  }
+
+  function canManageBoard(board) {
+    return board.sync.isFacilitator === true;
+  }
+
+  function chunk(list, size = MAX_PER_CHANGE) {
+    const pieces = [];
+    for (let i = 0; i < list.length; i += size) pieces.push(list.slice(i, i + size));
+    return pieces;
+  }
+
+  // Every card's place, as moveNotes expects it (used after Sort by votes).
+  function cardMoves(board) {
+    return board.cards.map((c) => ({ id: c.id, x: c.x, y: c.y, z: c.z, column: c.column }));
+  }
+
+  function isBoardFull(board, adding = 1) {
+    return board.cards.length + board.health.notes.length + adding > MAX_NOTES;
+  }
+
   const RetroLogic = {
     MAX_CHARS,
     COLUMNS,
@@ -432,6 +567,8 @@
     ZOOM_MIN,
     ZOOM_MAX,
     ZOOM_STEPS,
+    MAX_NOTES,
+    MAX_PER_CHANGE,
     splitChars,
     countChars,
     truncate,
@@ -469,6 +606,16 @@
     zoomAt,
     nextZoomStep,
     fitView,
+    boardFromServer,
+    areasToServer,
+    noteToServer,
+    nextAreaOrder,
+    applyChange,
+    canChangeNote,
+    canManageBoard,
+    chunk,
+    cardMoves,
+    isBoardFull,
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = RetroLogic;
