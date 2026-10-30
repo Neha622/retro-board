@@ -157,6 +157,8 @@
         socket.onopen = () => send({ type: 'connection_init' });
         socket.onmessage = (event) => handle(JSON.parse(event.data));
         socket.onclose = () => lost();
+        // Some WebSockets (such as Node 22's) report a refused connection only as an error.
+        socket.onerror = () => lost();
       }
 
       function handle(message) {
@@ -204,6 +206,7 @@
         socket.onopen = null;
         socket.onmessage = null;
         socket.onclose = null;
+        socket.onerror = null;
         try {
           socket.close();
         } catch (e) {
