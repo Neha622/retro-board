@@ -1,5 +1,7 @@
 // Drives headless Chrome over the DevTools protocol to try the board like a user would,
 // checking the spec's acceptance criteria with real typing, key presses and clicks.
+// [v3] The app is served by the fake AWS (tests/fake-aws.js), which also holds the shared board,
+// so "saved" means saved on the (fake) AWS. A second browser plays a teammate (plan §7).
 //
 // Run from the project folder:   node tests/browser-check.js
 // Needs Google Chrome in /Applications. Screenshots are saved to the folder printed at the end
@@ -8,17 +10,22 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { startFakeAws } = require('./fake-aws.js');
 
-const page = 'file://' + path.resolve(__dirname, '..', 'index.html');
+let page; // the fake AWS's address, once it has started
+let fake;
 const out = process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'retro-board-check-'));
 fs.mkdirSync(out, { recursive: true });
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = 9333;
+const TEAMMATE_PORT = 9334;
 
-const chrome = spawn(CHROME, [
-  '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${path.join(out, 'profile')}`,
+const chromeArgs = (port, profile) => [
+  '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${path.join(out, profile)}`,
   '--no-first-run', '--no-default-browser-check', 'about:blank',
-], { stdio: 'ignore' });
+];
+const chrome = spawn(CHROME, chromeArgs(PORT, 'profile'), { stdio: 'ignore' });
+let teammateChrome = null;
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 let ws, nextId = 1;
@@ -50,7 +57,7 @@ async function key(keyName, { shift = false, text } = {}) {
   const base = { key: keyName, code: keyName, windowsVirtualKeyCode: codes[keyName], modifiers: shift ? 8 : 0 };
   await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', text, ...base });
   await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
-  await wait(30);
+  await wait(80); // long enough for a change to reach the fake AWS and come back
 }
 
 async function type(text) {
@@ -72,7 +79,7 @@ async function clickAt(selector) {
   for (const type of ['mousePressed', 'mouseReleased']) {
     await send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
   }
-  await wait(50);
+  await wait(80);
 }
 
 async function centerOf(selector) {
@@ -106,15 +113,113 @@ async function screenshot(name) {
   fs.writeFileSync(path.join(out, name), Buffer.from(data, 'base64'));
 }
 
-async function load() {
-  await send('Page.navigate', { url: page });
-  await wait(600);
+// Waits until `check()` (an expression run in the page) is true, or gives up after `ms`.
+async function until(check, ms = 4000) {
+  const start = Date.now();
+  while (!(await js(check))) {
+    if (Date.now() - start > ms) return false;
+    await wait(50);
+  }
+  return true;
+}
+
+// Opens the app (the current board, or a new one if this browser has none) and waits until it's live.
+const BOARD_LIVE = `!document.getElementById('board').hidden && !document.querySelector('.column-well .btn-primary').disabled`;
+async function load(url = null) {
+  const current = await js('location.href').catch(() => '');
+  await send('Page.navigate', { url: url || (current.startsWith(page) ? current : page) });
+  await wait(300);
+  await until(BOARD_LIVE);
+}
+
+// The board as saved on the (fake) AWS, in the shape the app uses: { cards, health: { areas, notes } }.
+// A copy, so later changes don't alter it.
+async function savedBoard() {
+  const id = await js(`location.hash.replace('#board=', '')`);
+  const b = fake.boards.get(id);
+  const notes = [...b.notes.values()].filter((n) => n.generation === b.generation);
+  const areas = Object.entries(b.areas).sort((x, y) => x[1].order - y[1].order).map(([areaId, a]) => ({ id: areaId, ...a, votes: b.votes[areaId] }));
+  return JSON.parse(JSON.stringify({
+    cards: notes.filter((n) => n.kind === 'card'),
+    health: { areas, notes: notes.filter((n) => n.kind === 'health') },
+  }));
+}
+
+// Sets this browser's zoom and position for the current board, then reloads (spec Story 7.2).
+async function showView(v) {
+  await js(`localStorage.setItem('retro-view-' + location.hash.replace('#board=', ''), ${JSON.stringify(JSON.stringify(v))})`);
+  await load();
+}
+
+// A second, separate Chrome: a teammate with their own browser identity (plan §7).
+// Returns { send, js, until, screenshot, errors } for that browser.
+async function openTeammate() {
+  teammateChrome = spawn(CHROME, chromeArgs(TEAMMATE_PORT, 'teammate-profile'), { stdio: 'ignore' });
+  let targets;
+  for (let i = 0; i < 50; i++) {
+    try {
+      targets = await (await fetch(`http://127.0.0.1:${TEAMMATE_PORT}/json`)).json();
+      if (targets.some((t) => t.type === 'page')) break;
+    } catch (e) { /* not up yet */ }
+    await wait(200);
+  }
+  const socket = new WebSocket(targets.find((t) => t.type === 'page').webSocketDebuggerUrl);
+  await new Promise((r) => socket.addEventListener('open', r));
+  const waiting = new Map();
+  const teammateErrors = [];
+  let id = 1;
+  const tSend = (method, params = {}) => {
+    const i = id++;
+    socket.send(JSON.stringify({ id: i, method, params }));
+    return new Promise((resolve, reject) => waiting.set(i, { resolve, reject, method }));
+  };
+  socket.addEventListener('message', (m) => {
+    const msg = JSON.parse(m.data);
+    if (msg.id && waiting.has(msg.id)) {
+      const p = waiting.get(msg.id);
+      waiting.delete(msg.id);
+      msg.error ? p.reject(new Error(p.method + ': ' + msg.error.message)) : p.resolve(msg.result);
+    } else if (msg.method === 'Page.javascriptDialogOpening') {
+      tSend('Page.handleJavaScriptDialog', { accept: true });
+    } else if (msg.method === 'Runtime.exceptionThrown') {
+      teammateErrors.push(msg.params.exceptionDetails.exception?.description);
+    } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
+      teammateErrors.push(msg.params.args.map((a) => a.value).join(' '));
+    }
+  });
+  const tJs = async (expr) => {
+    const r = await tSend('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || expr);
+    return r.result.value;
+  };
+  await tSend('Runtime.enable');
+  await tSend('Page.enable');
+  await tSend('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  return {
+    send: tSend,
+    js: tJs,
+    errors: teammateErrors,
+    async until(check, ms = 4000) {
+      const start = Date.now();
+      while (!(await tJs(check).catch(() => false))) {
+        if (Date.now() - start > ms) return false;
+        await wait(50);
+      }
+      return true;
+    },
+    async screenshot(name) {
+      const { data } = await tSend('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(path.join(out, name), Buffer.from(data, 'base64'));
+    },
+  };
 }
 
 const cardTexts = (col) => js(`[...document.querySelectorAll('.column-${col} .card-text')].map(p => p.textContent)`);
 const focusedKey = () => js(`document.activeElement.dataset.focusKey || document.activeElement.id || document.activeElement.className`);
 
 (async () => {
+  fake = await startFakeAws();
+  page = fake.url;
   let targets;
   for (let i = 0; i < 50; i++) {
     try {
@@ -144,9 +249,9 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   await send('Runtime.enable');
   await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
-  await load();
+  await send('Page.navigate', { url: page + 'not-the-app' });
   await js('localStorage.clear()');
-  await load();
+  await load(page);
 
   // Story 1 — see the board
   const headings = await js(`[...document.querySelectorAll('.column h3')].map(h => h.textContent.trim())`);
@@ -335,11 +440,11 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   await clickAt(`${wellCard(3)} .edit-form .btn:not(.btn-primary)`);
   check('6.3 Cancel button restores the text', (await cardTexts('well'))[2] === 'Newest', await cardTexts('well'));
 
-  const ageBefore = await js(`JSON.parse(localStorage.getItem('retro-board')).cards.find(c => c.text === 'Great teamwork 🎉')`);
+  const ageBefore = (await savedBoard()).cards.find((c) => c.text === 'Great teamwork 🎉');
   await clickAt(`${wellCard(2)} [data-action="edit"]`);
   await type(' 💪');
   await clickAt(`${wellCard(2)} .edit-form .btn-primary`);
-  const ageAfter = await js(`JSON.parse(localStorage.getItem('retro-board')).cards.find(c => c.id === '${ageBefore.id}')`);
+  const ageAfter = (await savedBoard()).cards.find((c) => c.id === ageBefore.id);
   check('6.1 Save keeps reactions', ageAfter.text === 'Great teamwork 🎉 💪' && JSON.stringify(ageAfter.reactions) === JSON.stringify(ageBefore.reactions), ageAfter);
   check('6.5 editing keeps the card age', ageAfter.createdAt === ageBefore.createdAt);
 
@@ -361,7 +466,8 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   check('8.3 cancelling changes nothing', (await js(`document.querySelectorAll('.card').length`)) === 3);
   dialogAnswer = true;
   await clickAt('#clear-btn');
-  const cleared = await js(`({ cards: document.querySelectorAll('.card').length, disabled: document.getElementById('clear-btn').disabled, hints: [...document.querySelectorAll('.empty-hint')].filter(p => !p.hidden).length, saved: JSON.parse(localStorage.getItem('retro-board')).cards.length, focus: document.activeElement.id })`);
+  const cleared = await js(`({ cards: document.querySelectorAll('.card').length, disabled: document.getElementById('clear-btn').disabled, hints: [...document.querySelectorAll('.empty-hint')].filter(p => !p.hidden).length, focus: document.activeElement.id })`);
+  cleared.saved = (await savedBoard()).cards.length;
   check('8.2 confirming removes every card, everywhere', cleared.cards === 0 && cleared.hints === 3 && cleared.saved === 0, cleared);
   check('8.4 Clear board disabled when empty; focus moves to first add box', cleared.disabled && cleared.focus === 'add-well', cleared);
   await clickAt('#clear-btn');
@@ -378,7 +484,7 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   };
   const label = () => js(`document.getElementById('zoom-label').textContent`);
   const near = (a, b, tolerance = 1) => Math.abs(a - b) <= tolerance;
-  const stored = (text) => js(`JSON.parse(localStorage.getItem('retro-board')).cards.find(c => c.text === ${JSON.stringify(text)})`);
+  const stored = async (text) => (await savedBoard()).cards.find((c) => c.text === text);
   const noteSel = (id) => `[data-note-id="${id}"]`;
 
   check('10 whiteboard mode on a laptop screen', (await js(`document.body.classList.contains('is-canvas')`)) && (await view()) !== null);
@@ -423,9 +529,7 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   check('7.1 zoom and position survive a refresh', near(restored.x, panned.x) && near(restored.y, panned.y) && near(restored.zoom, panned.zoom, 0.001), { restored, panned });
 
   // Work at 75% on the Retro frame for the note checks, so the whole frame is on screen.
-  await js(`(() => { const b = JSON.parse(localStorage.getItem('retro-board')); b.view = { zoom: 0.75, x: 0, y: 60 };
-    localStorage.setItem('retro-board', JSON.stringify(b)); })()`);
-  await load();
+  await showView({ zoom: 0.75, x: 0, y: 60 });
 
   // Notes on the whiteboard
   for (const text of ['Alpha', 'Bravo', 'Charlie']) {
@@ -531,14 +635,8 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   // ===========================================================================
   // Phase 7 — Squad Health Check (Stories 12–15, 1.1, 4, 6, 8, 11)
   // ===========================================================================
-  const savedBoard = () => js(`JSON.parse(localStorage.getItem('retro-board'))`);
   const areaRow = (id) => `tr[data-area-id="${id}"]`;
   const healthNote = async (text) => (await savedBoard()).health.notes.find((n) => n.text === text);
-  async function showView(v) {
-    await js(`(() => { const b = JSON.parse(localStorage.getItem('retro-board')); b.view = ${JSON.stringify(v)};
-      localStorage.setItem('retro-board', JSON.stringify(b)); })()`);
-    await load();
-  }
   const healthX = await js(`document.querySelector('.frame-health').offsetLeft`);
   await showView({ zoom: 0.75, x: 40 - healthX * 0.75, y: 60 });
 
@@ -703,11 +801,11 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   check('8.2 Clear removes cards, health notes and votes', cleared2.cards.length === 0 && cleared2.health.notes.length === 0 && cleared2.health.areas.every((a) => a.votes.awesome + a.votes.fine + a.votes.sad === 0), cleared2.health.notes);
   check('8.2 …and keeps the areas, renamed ones included', cleared2.health.areas.length === 11 && cleared2.health.areas.some((a) => a.name === 'Joy 🎉') && cleared2.health.areas.some((a) => a.name === 'Retro quality'));
   check('8.4 Clear board disabled again', (await js(`document.getElementById('clear-btn').disabled`)) === true);
-  check('the add-note box closes when the board is cleared', (await js(`document.querySelectorAll('.add-note-form').length`)) === 0);
+  check('8.6 an open add-note box stays open when the board is cleared', (await js(`document.querySelectorAll('.add-note-form').length`)) === 1);
 
   // Story 9.2 — health check on a phone
   await clickAt(`${fun} [data-action="vote"][data-vote="fine"]`);
-  await clickAt(`${fun} [data-action="add-note"]`);
+  await js(`document.getElementById('add-note-area-fun').focus()`);
   await type('On a phone');
   await key('Enter');
   await key('Escape');
@@ -724,32 +822,160 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   await wait(300);
   await clickAt('#clear-btn');
 
-  // Story 7.3 — a board saved by v1 is upgraded
-  await js(`localStorage.setItem('retro-board', JSON.stringify({ version: 1, cards: [
+  // ===========================================================================
+  // v3 — two people on one shared board (Stories 16–19, and 4, 6, 8, 11, 15 as shared)
+  // This browser (A) starts a new board and is its facilitator; a second browser (B) is a teammate.
+  // ===========================================================================
+  await clickAt('#new-board-btn');
+  await until(`${BOARD_LIVE} && document.querySelectorAll('.card').length === 0`);
+  await showView({ zoom: 0.75, x: 0, y: 60 });
+  const link = await js('location.href');
+  const teammate = await openTeammate();
+  await teammate.send('Page.navigate', { url: link });
+  check('16.4 the teammate opens the board link and joins the same board', await teammate.until(BOARD_LIVE) && (await teammate.js('location.href')) === link);
+  const bManage = await teammate.js(`({ clear: document.getElementById('clear-btn').hidden, addArea: document.getElementById('add-area').hidden,
+    areaButtons: document.querySelectorAll('.area-actions').length, areas: document.querySelectorAll('#health-rows tr').length })`);
+  check('8.5/15.0 the teammate sees no Clear board, no Add area, no area Edit or Delete', bManage.clear && bManage.addArea && bManage.areaButtons === 0 && bManage.areas === 11, bManage);
+  check('the facilitator does see them', (await js(`!document.getElementById('clear-btn').hidden && !document.getElementById('add-area').hidden && document.querySelectorAll('.area-actions').length === 11`)) === true);
+
+  // Story 17 — live changes
+  await js(`document.getElementById('add-well').focus()`);
+  await type('From A 🎉');
+  const addedAt = Date.now();
+  await key('Enter');
+  const aCard = '.column-well .card';
+  const bSees = await teammate.until(`[...document.querySelectorAll('${aCard} .card-text')].some(p => p.textContent === 'From A 🎉')`, 2000);
+  check('17.1 the teammate sees a new card within 2 seconds, without refreshing', bSees, Date.now() - addedAt);
+  check('6.0/18.2 no Edit or Delete on someone else\'s card', (await teammate.js(`document.querySelectorAll('${aCard} [data-action="edit"], ${aCard} [data-action="delete"]').length`)) === 0);
+  check('18.1 the author does have Edit and Delete', (await js(`document.querySelectorAll('${aCard} [data-action="edit"]').length`)) === 1);
+  const fromA = await stored('From A 🎉');
+  check('2.1 the author\'s new card is placed, and its place saved for everyone', fromA.x === L.NOTE_GAP && fromA.y === L.NOTE_GAP, fromA);
+  check('17.3 notes show no names: just the text and the reactions', (await teammate.js(`[...document.querySelector('${aCard}').children].map(c => c.className).join()`)) === 'card-text,reactions');
+
+  // Story 4.8 — two people react at the same moment, and both count
+  const thumbs = `${aCard} [data-reaction="thumbsUp"].react-btn`;
+  await Promise.all([js(`document.querySelector('${thumbs}').click()`), teammate.js(`document.querySelector('${thumbs}').click()`)]);
+  const twoThumbs = `document.querySelector('${aCard} [data-reaction="thumbsUp"] .react-count').textContent === '2'`;
+  check('4.8 reactions clicked at the same moment both count, on both screens', (await until(twoThumbs)) && (await teammate.until(twoThumbs)));
+
+  // Story 11.8 — anyone may move anyone's note
+  await teammate.js(`(() => { const t = document.getElementById('add-improve'); t.focus(); t.value = 'From B'; t.dispatchEvent(new InputEvent('input')); document.querySelector('.column-improve .btn-primary').click(); })()`);
+  await until(`[...document.querySelectorAll('.column-improve .card-text')].some(p => p.textContent === 'From B')`);
+  check('the author sees the teammate\'s card, without Edit', (await js(`document.querySelectorAll('.column-improve .card [data-action="edit"]').length`)) === 0);
+  const fromB = await stored('From B');
+  await until(`document.querySelector('${noteSel(fromB.id)}').style.visibility !== 'hidden'`);
+  const bFrom = await centerOf(`${noteSel(fromB.id)} .card-text`);
+  await drag(bFrom, await centerOf('.column-notWell .drop-zone'));
+  const movedB = await stored('From B');
+  check('11.8 the facilitator can move the teammate\'s card', movedB.column === 'notWell', movedB);
+  check('11.9 the teammate sees it move', await teammate.until(`!!document.querySelector('.column-notWell ${noteSel(fromB.id)}')`));
+
+  // Story 6 — the author edits; the teammate sees it
+  await clickAt(`${aCard} [data-action="edit"]`);
+  await type(' edited');
+  await key('Enter');
+  check('the teammate sees the author\'s edit', await teammate.until(`document.querySelector('${aCard} .card-text').textContent === 'From A 🎉 edited'`));
+
+  // Story 5.6 — Sort by votes rearranges the cards for everyone
+  await js(`document.getElementById('add-well').focus()`);
+  await type('Second');
+  await key('Enter');
+  await teammate.js(`document.querySelectorAll('.column-well .card')[1].querySelector('[data-reaction="thumbsUp"].react-btn').click()`);
+  await teammate.js(`document.querySelectorAll('.column-well .card')[1].querySelector('[data-reaction="thumbsUp"].react-btn').click()`);
+  await until(`[...document.querySelectorAll('.column-well [data-reaction="thumbsUp"] .react-count')].map(c => c.textContent).join() === '2,2'`);
+  await teammate.js(`document.querySelectorAll('.column-well .card')[1].querySelector('[data-reaction="thumbsUp"].react-btn').click()`);
+  await until(`[...document.querySelectorAll('.column-well [data-reaction="thumbsUp"] .react-count')].map(c => c.textContent).join() === '2,3'`);
+  await clickAt('#sort-btn');
+  check('5.6 Sort by votes on one screen rearranges the cards for everyone', await teammate.until(`[...document.querySelectorAll('.column-well .card-text')].map(p => p.textContent).join('|') === 'Second|From A 🎉 edited'`));
+
+  // Story 13 — votes from both people
+  await teammate.js(`document.querySelector('[data-target-id="area-fun"][data-action="vote"][data-vote="sad"]').click()`);
+  check('the facilitator sees the teammate\'s health vote', await until(`document.querySelector('tr[data-area-id="area-fun"] .vote-sad .vote-count').textContent === '1'`));
+
+  // Story 8 — only the facilitator clears; everyone sees it; a note being typed is kept
+  await teammate.js(`(() => { const t = document.getElementById('add-improve'); t.value = 'Still typing'; t.dispatchEvent(new InputEvent('input')); })()`);
+  dialogAnswer = true;
+  await clickAt('#clear-btn');
+  check('8.2 the facilitator\'s Clear empties the teammate\'s board too', await teammate.until(`document.querySelectorAll('.card').length === 0 && document.querySelector('tr[data-area-id="area-fun"] .vote-sad .vote-count').textContent === '0'`));
+  check('8.6 text the teammate was typing stays in the box', (await teammate.js(`document.getElementById('add-improve').value`)) === 'Still typing');
+  await teammate.js(`document.querySelector('.column-improve .btn-primary').click()`);
+  check('8.6 …and can still be added after the Clear', await until(`[...document.querySelectorAll('.column-improve .card-text')].some(p => p.textContent === 'Still typing')`));
+
+  // Story 19 — losing and regaining the connection
+  fake.setBlocked(true);
+  const offline = `!document.getElementById('connection-banner').hidden && document.getElementById('connection-banner').textContent === 'Connection lost. Reconnecting…' && document.querySelector('.column-well .btn-primary').disabled && document.querySelector('[data-action="react"]').disabled`;
+  check('19.1 a lost connection shows the banner and pauses every change', await teammate.until(offline, 5000));
+  await teammate.js(`(() => { const t = document.getElementById('add-notWell'); t.value = 'Typed offline'; t.dispatchEvent(new InputEvent('input')); })()`);
+  await teammate.screenshot('12-connection-lost.png');
+  fake.setBlocked(false);
+  check('19.3 when it comes back, the banner goes and changes work again', await teammate.until(`document.getElementById('connection-banner').hidden && !document.querySelector('.column-well .btn-primary').disabled`, 8000));
+  check('19.2 text typed while offline is kept', (await teammate.js(`document.getElementById('add-notWell').value`)) === 'Typed offline');
+  await until(BOARD_LIVE, 8000);
+  await js(`document.getElementById('add-well').focus()`);
+  await type('After reconnect');
+  await key('Enter');
+  check('live changes flow again after reconnecting', await teammate.until(`[...document.querySelectorAll('.column-well .card-text')].some(p => p.textContent === 'After reconnect')`));
+
+  // Story 16.3 — Copy link
+  await teammate.js(`document.getElementById('copy-link-btn').click()`);
+  await wait(200);
+  const copied = await teammate.js(`({ flash: document.getElementById('app-message').textContent, box: !document.getElementById('link-box').hidden, value: document.getElementById('link-input').value })`);
+  check('16.3 Copy link copies the board link (or shows it to copy by hand)', copied.flash === 'Link copied' || (copied.box && copied.value === link), copied);
+
+  // Story 9.2 — the shared rules on a phone
+  await teammate.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await wait(300);
+  const bPhone = await teammate.js(`({ canvas: document.body.classList.contains('is-canvas'), copy: !document.getElementById('copy-link-btn').hidden,
+    clear: document.getElementById('clear-btn').hidden, edits: document.querySelectorAll('.column-well .card [data-action="edit"]').length,
+    cards: document.querySelectorAll('.column-well .card').length })`);
+  check('9.2 on a phone: same board, Copy link shown, Clear hidden, no Edit on others\' cards', !bPhone.canvas && bPhone.copy && bPhone.clear && bPhone.edits === 0 && bPhone.cards === 1, bPhone);
+  await teammate.screenshot('13-teammate-phone.png');
+
+  // Story 16.7 — a link to a board that doesn't exist
+  await teammate.send('Page.navigate', { url: page + '#board=no-such-board' });
+  check('16.7 a missing board shows a message with Start a new board', await teammate.until(`document.getElementById('status-text').textContent === "This board doesn't exist or has been deleted." && document.getElementById('status-btn').textContent === 'Start a new board'`));
+  await teammate.js(`document.getElementById('status-btn').click()`);
+  check('16.7 Start a new board opens a new board, with the teammate as its facilitator', await teammate.until(`${BOARD_LIVE} && !document.getElementById('clear-btn').hidden`));
+  check('16.2 the teammate\'s last board is remembered', await teammate.js(`JSON.parse(localStorage.getItem('retro-browser')).lastBoardId === location.hash.replace('#board=', '')`));
+  check('no errors in the teammate\'s console', teammate.errors.length === 0, teammate.errors);
+
+  // Stories 20 and 7.4 — a board saved by v1 in this browser moves into its first shared board
+  const v1Board = JSON.stringify({ version: 1, cards: [
     { id: 'v1a', column: 'improve', text: 'From v1 🐢', createdAt: 1, reactions: { thumbsUp: 2, heart: 0, laugh: 0, party: 0, wow: 0 } },
-    { id: 'v1b', column: 'well', text: 'Also v1', createdAt: 2, reactions: { thumbsUp: 0, heart: 1, laugh: 0, party: 0, wow: 0 } } ] }))`);
-  await load();
+    { id: 'v1b', column: 'well', text: 'Also v1', createdAt: 2, reactions: { thumbsUp: 0, heart: 1, laugh: 0, party: 0, wow: 0 } } ] });
+  await send('Page.navigate', { url: page + 'not-the-app' });
+  await js(`localStorage.clear(); localStorage.setItem('retro-board', ${JSON.stringify(v1Board)})`);
+  await load(page);
+  await until(`document.querySelectorAll('.card').length === 2`);
   const upgraded = await js(`({ improve: [...document.querySelectorAll('.column-improve .card-text')].map(p => p.textContent),
     well: [...document.querySelectorAll('.column-well .card-text')].map(p => p.textContent),
-    notice: document.getElementById('save-notice').hidden })`);
-  check('7.3 a v1 board opens with every card kept', JSON.stringify(upgraded.improve) === '["From v1 🐢"]' && JSON.stringify(upgraded.well) === '["Also v1"]' && upgraded.notice, upgraded);
-  await clickAt('.column-well [data-reaction="thumbsUp"].react-btn');
-  const resaved = await js(`(() => { const b = JSON.parse(localStorage.getItem('retro-board')); return { version: b.version, cards: b.cards.length, areas: b.health.areas.length }; })()`);
-  check('7.3 the upgraded board is saved as version 2 with the 11 areas', resaved.version === 2 && resaved.cards === 2 && resaved.areas === 11, resaved);
+    editable: document.querySelectorAll('.card [data-action="edit"]').length,
+    thumbs: document.querySelector('.column-improve [data-reaction="thumbsUp"] .react-count').textContent,
+    notice: document.getElementById('save-notice').hidden, old: localStorage.getItem('retro-board') })`);
+  check('20.1/7.4 a v1 board moves into the first shared board, every card and reaction kept', JSON.stringify(upgraded.improve) === '["From v1 🐢"]' && JSON.stringify(upgraded.well) === '["Also v1"]' && upgraded.thumbs === '2' && upgraded.notice, upgraded);
+  check('20.1 the moved cards are mine', upgraded.editable === 2, upgraded);
+  const resaved = await savedBoard();
+  check('20.1 the shared board has them, with the 11 areas', resaved.cards.length === 2 && resaved.health.areas.length === 11, resaved);
+  check('20.2 the old saved copy is left untouched', upgraded.old === v1Board);
+  await clickAt('#new-board-btn');
+  await until(`${BOARD_LIVE} && document.querySelectorAll('.card').length === 0`);
+  check('20.2 a second board doesn\'t move it again', (await js(`document.querySelectorAll('.card').length`)) === 0);
 
-  // Story 7.2 — saving blocked
-  await js(`localStorage.setItem('retro-board', '{broken')`);
-  await load();
-  const damaged = await js(`({ hidden: document.getElementById('save-notice').hidden, text: document.getElementById('save-notice').textContent, backup: localStorage.getItem('retro-board-backup') })`);
-  check('damaged data: notice shown, backup kept', !damaged.hidden && damaged.text.startsWith("The saved board couldn't") && damaged.backup === '{broken', damaged);
+  // A damaged old board isn't moved; a new, empty board opens
+  await send('Page.navigate', { url: page + 'not-the-app' });
+  await js(`localStorage.clear(); localStorage.setItem('retro-board', '{broken')`);
+  await load(page);
+  check('a damaged old board is skipped; a new empty board opens', (await js(`document.querySelectorAll('.card').length === 0 && document.getElementById('save-notice').hidden`)) === true);
+
+  // Story 18 — a browser that can't remember anything still works, with a new identity each time
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `Storage.prototype.setItem = function () { throw new Error('QuotaExceededError'); };` });
-  await load();
+  await load(page);
   const blocked = await js(`({ hidden: document.getElementById('save-notice').hidden, text: document.getElementById('save-notice').textContent })`);
-  check('7.2 notice shown when saving is blocked', !blocked.hidden && blocked.text.startsWith("This board can't be saved"), blocked);
+  check('notice shown when this browser can\'t remember anything', !blocked.hidden && blocked.text.startsWith("This browser can't remember you"), blocked);
   await js(`document.getElementById('add-well').focus()`);
   await type('Still works');
   await key('Enter');
-  check('7.2 board still works when saving is blocked', (await cardTexts('well')).includes('Still works'));
+  check('the board still works when this browser can\'t remember anything', await until(`[...document.querySelectorAll('.column-well .card-text')].some(p => p.textContent === 'Still works')`));
   await screenshot('4-notice.png');
 
   // Story 9 — phone layout
@@ -772,10 +998,16 @@ const focusedKey = () => js(`document.activeElement.dataset.focusKey || document
   const failed = results.filter((r) => !r.ok).length;
   console.log(`\n${results.length - failed}/${results.length} passed. Screenshots: ${out}`);
   ws.close();
-  chrome.kill();
+  await shutDown();
   process.exit(failed ? 1 : 0);
-})().catch((e) => {
+})().catch(async (e) => {
   console.error(e);
-  chrome.kill();
+  await shutDown();
   process.exit(1);
 });
+
+async function shutDown() {
+  chrome.kill();
+  if (teammateChrome) teammateChrome.kill();
+  if (fake) await fake.close();
+}
